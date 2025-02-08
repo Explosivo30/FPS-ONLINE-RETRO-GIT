@@ -76,7 +76,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 78505dce51b94bd4aa8e31ef4bf557fa, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  playerCamera: {fileID: 0}
   virtualCamera: {fileID: 2269354322238946516}
   ShotMask:
     serializedVersion: 2
@@ -1895,7 +1894,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 0acfa5aec3cdce4458d2e7f5134b3e75, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  playerCamera: {fileID: 0}
   virtualCamera: {fileID: 2269354322238946516}
   ShotMask:
     serializedVersion: 2
@@ -3400,7 +3398,6 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 3554777945398045887}
-  - component: {fileID: 5942005907325555206}
   - component: {fileID: 1107812376785577779}
   - component: {fileID: 2269354322238946516}
   m_Layer: 0
@@ -3428,14 +3425,6 @@ Transform:
   - {fileID: 3084288764642917339}
   m_Father: {fileID: 42799720106697189}
   m_LocalEulerAnglesHint: {x: -22.185001, y: 214.243, z: -61.877003}
---- !u!81 &5942005907325555206
-AudioListener:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 3562124012199023708}
-  m_Enabled: 1
 --- !u!114 &1107812376785577779
 MonoBehaviour:
   m_ObjectHideFlags: 0
