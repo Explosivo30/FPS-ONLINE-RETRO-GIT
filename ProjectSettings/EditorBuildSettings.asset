@@ -6,6 +6,9 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
+    path: Assets/Scenes/SpaceFight.unity
+    guid: f00acdd87465aa74fb54653f9ca4caf6
+  - enabled: 1
     path: Assets/Scenes/OnlineTry.unity
     guid: af95faec1424da94bae9bac637dd59e3
   - enabled: 0
