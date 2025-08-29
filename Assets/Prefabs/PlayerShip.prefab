@@ -104,9 +104,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 9839b12adcc33f34095266003223a6fb, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  moveSpeed: 10
+  moveSpeed: 400
   rotationSpeed: 100
-  drag: 0.5
+  drag: 5.28
 --- !u!143 &7245068167432293694
 CharacterController:
   m_ObjectHideFlags: 0

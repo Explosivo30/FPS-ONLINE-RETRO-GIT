@@ -19,10 +19,45 @@ public class SpaceShipController : NetworkBehaviour
 
     public override void OnNetworkSpawn()
     {
-        if (!IsOwner) return;
+        if (IsOwner)
+        {
+            NotifyServerPlayerConnectedServerRpc();
+            Cursor.visible = false;
+            Cursor.lockState = CursorLockMode.Locked;
+        }
+        
+        if(IsHost)
+        {
+            GameManagerSpace.Instance.AddPlayer(this);
+            Debug.Log("Added Host");
+        }
+        
+    }
 
-        Cursor.visible = false;
-        Cursor.lockState = CursorLockMode.Locked;
+    public override void OnNetworkDespawn()
+    {
+        if (IsOwner)
+        {
+            NotifyServerPlayerDisconnectedServerRpc();
+        }
+
+        if (IsHost)
+        {
+            GameManagerSpace.Instance.RemovePlayer(this);
+        }
+    }
+
+    [ServerRpc]
+    private void NotifyServerPlayerConnectedServerRpc(ServerRpcParams rpcParams = default)
+    {
+        GameManagerSpace.Instance.AddPlayer(this);
+        
+    }
+
+    [ServerRpc]
+    private void NotifyServerPlayerDisconnectedServerRpc(ServerRpcParams rpcParams = default)
+    {
+        GameManagerSpace.Instance.RemovePlayer(this);
     }
 
     private void Update()
