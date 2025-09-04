@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -7,6 +8,9 @@ public class ClientSingleton : MonoBehaviour
 {
     private static ClientSingleton instance;
     public ClientGameManager GameManager { get; private set; }
+
+
+   
 
     public static ClientSingleton Instance
     {
@@ -36,5 +40,9 @@ public class ClientSingleton : MonoBehaviour
 
         return await GameManager.InitAsync();
     }
+
+
+
+    
 
 }
