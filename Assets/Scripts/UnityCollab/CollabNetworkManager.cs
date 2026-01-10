@@ -54,14 +54,27 @@ public class CollabNetworkManager : MonoBehaviour
     {
         if (UnityServices.State == ServicesInitializationState.Initialized) return;
 
+        // Opciones de inicialización
+        InitializationOptions options = new InitializationOptions();
+
+#if UNITY_EDITOR
+        // TRUCO: Si estamos en el editor, usamos un perfil basado en el nombre de la carpeta
+        // Esto permite clonar el proyecto y que cada clon tenga su propio ID.
+        // Si usas ParrelSync o copias la carpeta, esto lo arregla.
+        string profileName = System.IO.Path.GetFileName(System.IO.Directory.GetCurrentDirectory());
+        options.SetProfile(profileName);
+#endif
+
         try
         {
-            await UnityServices.InitializeAsync();
+            await UnityServices.InitializeAsync(options);
+
             if (!AuthenticationService.Instance.IsSignedIn)
             {
                 await AuthenticationService.Instance.SignInAnonymouslyAsync();
             }
             playerId = AuthenticationService.Instance.PlayerId;
+            Debug.Log($"[Collab] Logueado con ID: {playerId}");
         }
         catch (Exception e)
         {
@@ -109,11 +122,24 @@ public class CollabNetworkManager : MonoBehaviour
     // --- 3. Unirse a Sesión (Cliente) ---
     public async Task<bool> JoinSession(string lobbyCode)
     {
+        // PASO 1: Asegurarnos de que no estamos conectados de antes
+        Shutdown();
+
         await InitializeServices();
 
         try
         {
+            // PASO 2: Verificar si ya estamos en ese Lobby (por si acaso)
+            if (!string.IsNullOrEmpty(currentLobbyId))
+            {
+                try { await LobbyService.Instance.RemovePlayerAsync(currentLobbyId, playerId); }
+                catch { /* Ignoramos si falla al salir, es solo limpieza */ }
+                currentLobbyId = null;
+            }
+
+            Debug.Log($"Intentando unirse a: {lobbyCode}...");
             Lobby lobby = await LobbyService.Instance.JoinLobbyByCodeAsync(lobbyCode);
+
             currentLobbyId = lobby.Id;
             CurrentLobbyCode = lobby.LobbyCode;
 
@@ -124,11 +150,13 @@ public class CollabNetworkManager : MonoBehaviour
             BindTransport(relayServerData, false);
 
             IsConnected = true;
+            Debug.Log("<color=green>CLIENTE: Conexión establecida con Relay.</color>");
             return true;
         }
         catch (Exception e)
         {
             Debug.LogError($"Error uniéndose: {e.Message}");
+            // Si falla, reseteamos todo para que el usuario pueda volver a darle al botón sin errores
             Shutdown();
             return false;
         }
