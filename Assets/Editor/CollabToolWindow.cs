@@ -35,11 +35,20 @@ public class CollabToolWindow : EditorWindow
             EditorGUILayout.HelpBox("No se detecta el sistema en la escena.", MessageType.Warning);
             if (GUILayout.Button("Inicializar Sistema", GUILayout.Height(30)))
             {
-                GameObject go = new GameObject("_CollabManager");
-                go.AddComponent<CollabNetworkManager>();
-                // Forzamos que se guarde en la escena para que no desaparezca
+                // 1. Creamos UN solo objeto para todo el sistema
+                GameObject go = new GameObject("_NetworkSystem");
+
+                // 2. Le ponemos los DOS componentes necesarios
+                go.AddComponent<CollabNetworkManager>(); // El Cartero
+                go.AddComponent<SceneSyncManager>();     // El Cerebro
+
+                // 3. (Opcional) Evita que se borre si cambias de escena, útil para managers
+                // DontDestroyOnLoad(go); 
+
+                // 4. Guardamos para que no desaparezca al cerrar Unity
                 UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(go.scene);
-                Debug.Log("Sistema de colaboración creado.");
+
+                Debug.Log("<color=green>Sistema inicializado: _NetworkSystem creado con ambos scripts.</color>");
             }
         }
         else

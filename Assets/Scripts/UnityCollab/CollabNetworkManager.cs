@@ -198,8 +198,13 @@ public class CollabNetworkManager : MonoBehaviour
 
                     Debug.Log($"Mensaje recibido: {json}");
 
-                    // Aquí conectarías con tu SceneSyncManager
-                    // SceneSyncManager.Instance.ApplyChange(JsonUtility.FromJson<SceneChangeData>(json));
+                    if (SceneSyncManager.Instance != null)
+                    {
+                        var data = JsonUtility.FromJson<SceneChangeData>(json);
+                        SceneSyncManager.Instance.ApplyChange(data);
+                    }
+
+                   
                 }
                 else if (cmd == NetworkEvent.Type.Disconnect)
                 {
