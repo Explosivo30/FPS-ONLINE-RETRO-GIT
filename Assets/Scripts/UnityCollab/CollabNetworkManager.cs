@@ -54,16 +54,13 @@ public class CollabNetworkManager : MonoBehaviour
     {
         if (UnityServices.State == ServicesInitializationState.Initialized) return;
 
-        // Opciones de inicialización
         InitializationOptions options = new InitializationOptions();
 
-#if UNITY_EDITOR
-        // TRUCO: Si estamos en el editor, usamos un perfil basado en el nombre de la carpeta
-        // Esto permite clonar el proyecto y que cada clon tenga su propio ID.
-        // Si usas ParrelSync o copias la carpeta, esto lo arregla.
-        string profileName = System.IO.Path.GetFileName(System.IO.Directory.GetCurrentDirectory());
-        options.SetProfile(profileName);
-#endif
+        // TRUCO FINAL: Usamos un número aleatorio grande. 
+        // Esto asegura que aunque uses la misma cuenta y el mismo PC, 
+        // Unity te vea como un usuario distinto cada vez.
+        string randomProfile = "User_" + UnityEngine.Random.Range(0, 999999).ToString();
+        options.SetProfile(randomProfile);
 
         try
         {
@@ -74,7 +71,7 @@ public class CollabNetworkManager : MonoBehaviour
                 await AuthenticationService.Instance.SignInAnonymouslyAsync();
             }
             playerId = AuthenticationService.Instance.PlayerId;
-            Debug.Log($"[Collab] Logueado con ID: {playerId}");
+            Debug.Log($"<color=cyan>[Collab] Autenticado. Perfil: {randomProfile} | ID: {playerId}</color>");
         }
         catch (Exception e)
         {

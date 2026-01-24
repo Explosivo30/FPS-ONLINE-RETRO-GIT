@@ -2156,9 +2156,9 @@ GameObject:
   m_Component:
   - component: {fileID: 1466158399}
   - component: {fileID: 1466158398}
-  - component: {fileID: 1466158397}
   - component: {fileID: 1466158396}
   - component: {fileID: 1466158395}
+  - component: {fileID: 1466158397}
   m_Layer: 0
   m_Name: Cube (1)
   m_TagString: Untagged
