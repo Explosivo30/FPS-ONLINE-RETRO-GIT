@@ -20,6 +20,7 @@ using UnityEditor;
 public class CollabNetworkManager : MonoBehaviour
 {
     public static CollabNetworkManager Instance;
+
     private const string LOBBY_NAME = "CollabSession";
     private const int MAX_PLAYERS = 4;
 
@@ -45,22 +46,21 @@ public class CollabNetworkManager : MonoBehaviour
 #if UNITY_EDITOR
         EditorApplication.update -= UpdateNetworkLoop;
 #endif
-        _ = Shutdown();
+        _ = Shutdown(); // Cierre seguro
     }
 
-    // --- 1. INICIALIZACIÓN (VERSIÓN ARREGLADA) ---
+    // --- 1. INICIALIZACIÓN (CORREGIDA) ---
     public async Task InitializeServices()
     {
         if (UnityServices.State == ServicesInitializationState.Initialized) return;
 
         InitializationOptions options = new InitializationOptions();
 
-        // --- CAMBIO CLAVE AQUÍ ---
-        // Antes usabas el nombre de la carpeta. ESO ESTABA MAL.
-        // Ahora usamos un número aleatorio. Esto arregla el "Player already in lobby".
+        // [CORRECCIÓN CRÍTICA]
+        // Antes usabas el nombre de la carpeta. Eso causaba el conflicto de identidad.
+        // Ahora usamos un número aleatorio para garantizar que Host y Cliente sean distintos.
         string randomProfile = "User_" + UnityEngine.Random.Range(1000, 999999);
         options.SetProfile(randomProfile);
-        // -------------------------
 
         try
         {
@@ -115,7 +115,9 @@ public class CollabNetworkManager : MonoBehaviour
     // --- 3. UNIRSE A SESIÓN ---
     public async Task<bool> JoinSession(string lobbyCode)
     {
-        await Shutdown(); // Limpieza preventiva para evitar error rojo
+        // Limpiamos cualquier conexión previa para evitar el error "Resetting event queue"
+        await Shutdown();
+
         await InitializeServices();
 
         try
@@ -172,9 +174,16 @@ public class CollabNetworkManager : MonoBehaviour
     {
         if (!IsConnected || !driver.IsCreated) return;
 
+        // Completamos el trabajo del frame anterior
         driver.ScheduleUpdate().Complete();
+
+        // Limpieza de conexiones muertas
         CleanConnections();
+
+        // Aceptamos nuevas conexiones (si somos host)
         AcceptNewConnections();
+
+        // Procesamos mensajes
         ProcessMessages();
     }
 
@@ -233,6 +242,7 @@ public class CollabNetworkManager : MonoBehaviour
             }
         }
     }
+
     private void AcceptNewConnections()
     {
         NetworkConnection c;
@@ -245,15 +255,19 @@ public class CollabNetworkManager : MonoBehaviour
     public async Task Shutdown()
     {
         IsConnected = false;
-        // Limpiamos agresivamente para evitar el error rojo de "Pending Events"
+
+        // Limpiamos drivers
         if (driver.IsCreated) driver.Dispose();
         if (connections.IsCreated) connections.Dispose();
 
+        // Salimos del Lobby
         if (!string.IsNullOrEmpty(currentLobbyId) && playerId != null)
         {
             try { await LobbyService.Instance.RemovePlayerAsync(currentLobbyId, playerId); }
             catch { }
         }
+
         currentLobbyId = null;
+        // No reseteamos playerId para no perder la sesión de Auth
     }
 }
