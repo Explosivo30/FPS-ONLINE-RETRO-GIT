@@ -16,19 +16,21 @@ using Unity.Collections;
 using UnityEditor;
 #endif
 
-[ExecuteAlways] // Esto permite que funcione SIN Play Mode
+[ExecuteAlways]
 public class CollabNetworkManager : MonoBehaviour
 {
     public static CollabNetworkManager Instance;
-
     private const string LOBBY_NAME = "CollabSession";
     private const int MAX_PLAYERS = 4;
 
     public bool IsConnected { get; private set; } = false;
     public string CurrentLobbyCode { get; private set; }
+
+    // Variables de sesión
     private string currentLobbyId;
     private string playerId;
 
+    // Variables de Red
     private NetworkDriver driver;
     private NativeList<NetworkConnection> connections;
     private RelayServerData relayServerData;
@@ -36,59 +38,67 @@ public class CollabNetworkManager : MonoBehaviour
     void OnEnable()
     {
         Instance = this;
-        // Nos enganchamos al bucle del editor para funcionar sin Play
+        // IMPORTANTE: Nos enganchamos al update del editor directamente
 #if UNITY_EDITOR
-        EditorApplication.update += UpdateNetworkLoop;
+        EditorApplication.update -= NetworkTick; // Limpieza preventiva
+        EditorApplication.update += NetworkTick;
 #endif
     }
 
     void OnDisable()
     {
 #if UNITY_EDITOR
-        EditorApplication.update -= UpdateNetworkLoop;
+        EditorApplication.update -= NetworkTick;
 #endif
         _ = Shutdown();
     }
 
     // --- 1. INICIALIZACIÓN ---
-    public async Task InitializeServices()
+    public async Task<bool> InitializeServices()
     {
-        if (UnityServices.State == ServicesInitializationState.Initialized) return;
+        if (UnityServices.State == ServicesInitializationState.Initialized) return true;
 
         InitializationOptions options = new InitializationOptions();
-        // Perfil aleatorio para evitar conflictos de "Usuario duplicado"
-        string randomProfile = "Dev_" + UnityEngine.Random.Range(1000, 999999);
+        // ID Aleatorio para evitar conflictos de "Usuario duplicado"
+        string randomProfile = "EditorUser_" + UnityEngine.Random.Range(1000, 999999);
         options.SetProfile(randomProfile);
 
         try
         {
             await UnityServices.InitializeAsync(options);
+
             if (!AuthenticationService.Instance.IsSignedIn)
             {
                 await AuthenticationService.Instance.SignInAnonymouslyAsync();
             }
+
             playerId = AuthenticationService.Instance.PlayerId;
-            Debug.Log($"<color=cyan>[MODO EDITOR] Conectado como: {randomProfile}</color>");
+            Debug.Log($"<color=cyan>[Collab] Servicios Listos. Perfil: {randomProfile}</color>");
+            return true;
         }
         catch (Exception e)
         {
             Debug.LogError($"[Collab] Error Init: {e.Message}");
+            return false;
         }
     }
 
-    // --- 2. CREAR SESIÓN ---
+    // --- 2. CREAR SESIÓN (HOST) ---
     public async Task<string> CreateSession()
     {
-        await InitializeServices();
+        if (!await InitializeServices()) return null;
 
         try
         {
+            // 1. Crear Relay
             Allocation allocation = await RelayService.Instance.CreateAllocationAsync(MAX_PLAYERS);
             string joinCode = await RelayService.Instance.GetJoinCodeAsync(allocation.AllocationId);
 
+            // 2. Configurar Transporte
             relayServerData = new RelayServerData(allocation, "dtls");
             BindTransport(relayServerData, true);
 
+            // 3. Crear Lobby
             CreateLobbyOptions options = new CreateLobbyOptions();
             options.Data = new Dictionary<string, DataObject> {
                 { "RelayJoinCode", new DataObject(DataObject.VisibilityOptions.Member, joinCode) }
@@ -99,36 +109,48 @@ public class CollabNetworkManager : MonoBehaviour
             CurrentLobbyCode = lobby.LobbyCode;
 
             IsConnected = true;
+            Debug.Log($"<color=green>[HOST] Sala creada: {CurrentLobbyCode}</color>");
+
+            // TRUCO: Forzamos un repintado inmediato para evitar congelación
+#if UNITY_EDITOR
+            EditorApplication.QueuePlayerLoopUpdate();
+#endif
             return CurrentLobbyCode;
         }
         catch (Exception e)
         {
-            Debug.LogError($"Error creando: {e.Message}");
+            Debug.LogError($"Error creando sesión: {e.Message}");
             await Shutdown();
             return null;
         }
     }
 
-    // --- 3. UNIRSE A SESIÓN ---
+    // --- 3. UNIRSE A SESIÓN (CLIENTE) ---
     public async Task<bool> JoinSession(string lobbyCode)
     {
-        await Shutdown();
-        await InitializeServices();
+        await Shutdown(); // Limpieza preventiva
+        if (!await InitializeServices()) return false;
 
         try
         {
+            Debug.Log($"Buscando sala {lobbyCode}...");
             Lobby lobby = await LobbyService.Instance.JoinLobbyByCodeAsync(lobbyCode);
+
             currentLobbyId = lobby.Id;
             CurrentLobbyCode = lobby.LobbyCode;
 
             string relayJoinCode = lobby.Data["RelayJoinCode"].Value;
-            JoinAllocation joinAllocation = await RelayService.Instance.JoinAllocationAsync(relayJoinCode);
 
+            JoinAllocation joinAllocation = await RelayService.Instance.JoinAllocationAsync(relayJoinCode);
             relayServerData = new RelayServerData(joinAllocation, "dtls");
             BindTransport(relayServerData, false);
 
             IsConnected = true;
-            Debug.Log("<color=green>¡CONECTADO EN MODO EDITOR!</color>");
+            Debug.Log("<color=green>[CLIENTE] ¡Conectado!</color>");
+
+#if UNITY_EDITOR
+            EditorApplication.QueuePlayerLoopUpdate();
+#endif
             return true;
         }
         catch (Exception e)
@@ -139,6 +161,7 @@ public class CollabNetworkManager : MonoBehaviour
         }
     }
 
+    // --- 4. LÓGICA DE RED (EL CORAZÓN) ---
     private void BindTransport(RelayServerData relayData, bool isHost)
     {
         if (driver.IsCreated) driver.Dispose();
@@ -152,7 +175,7 @@ public class CollabNetworkManager : MonoBehaviour
 
         if (isHost)
         {
-            if (driver.Bind(NetworkEndPoint.AnyIpv4) != 0) Debug.LogError("Bind falló");
+            if (driver.Bind(NetworkEndPoint.AnyIpv4) != 0) Debug.LogError("Host Bind Falló");
             else driver.Listen();
         }
         else
@@ -162,14 +185,14 @@ public class CollabNetworkManager : MonoBehaviour
         }
     }
 
-    // --- 4. BUCLE DE RED (IMPORTANTE PARA EDIT MODE) ---
-    private void UpdateNetworkLoop()
+    // Esta función se ejecuta CADA FRAME DEL EDITOR
+    private void NetworkTick()
     {
+        // Si no estamos conectados o el driver no existe, no hacemos nada
         if (!IsConnected || !driver.IsCreated) return;
 
-        // [TRUCO CLAVE] 
-        // Si estamos en el editor y NO estamos dando Play, obligamos a Unity 
-        // a actualizarse constantemente para procesar la red.
+        // IMPORTANTE: Obligamos a Unity a redibujar y procesar eventos
+        // Esto evita que la conexión muera por inactividad
 #if UNITY_EDITOR
         if (!EditorApplication.isPlaying)
         {
@@ -200,12 +223,13 @@ public class CollabNetworkManager : MonoBehaviour
 
                     if (SceneSyncManager.Instance != null)
                     {
-                        // Procesamos el mensaje aunque estemos en Edit Mode
-                        SceneSyncManager.Instance.ApplyChange(data: JsonUtility.FromJson<SceneChangeData>(json));
+                        var data = JsonUtility.FromJson<SceneChangeData>(json);
+                        SceneSyncManager.Instance.ApplyChange(data);
                     }
                 }
                 else if (cmd == NetworkEvent.Type.Disconnect)
                 {
+                    Debug.Log("Desconexión detectada.");
                     connections[i] = default(NetworkConnection);
                 }
             }

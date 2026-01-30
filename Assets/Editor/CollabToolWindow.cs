@@ -18,102 +18,113 @@ public class CollabToolWindow : EditorWindow
     {
         scrollPos = EditorGUILayout.BeginScrollView(scrollPos);
 
-        GUILayout.Label("Herramienta de Colaboración", EditorStyles.boldLabel);
+        GUILayout.Label("Herramienta de Colaboración (Modo Editor)", EditorStyles.boldLabel);
         GUILayout.Space(10);
 
         // Estado visual
-        GUI.backgroundColor = status.Contains("Código") || status == "Conectado" ? Color.green : Color.white;
+        if (status.Contains("HOST")) GUI.backgroundColor = Color.cyan;
+        else if (status.Contains("CLIENTE")) GUI.backgroundColor = Color.green;
+        else if (status.Contains("Error")) GUI.backgroundColor = Color.red;
+        else GUI.backgroundColor = Color.white;
+
         GUILayout.Label($"Estado: {status}", EditorStyles.helpBox);
         GUI.backgroundColor = Color.white;
 
         GUILayout.Space(10);
 
-        // --- SECCIÓN 1: INICIALIZACIÓN ---
-        // Comprobamos si existe el Manager en la escena (ya no importa si es Play o Edit)
         if (CollabNetworkManager.Instance == null)
         {
-            EditorGUILayout.HelpBox("No se detecta el sistema en la escena.", MessageType.Warning);
+            EditorGUILayout.HelpBox("Sistema no detectado en la escena.", MessageType.Warning);
             if (GUILayout.Button("Inicializar Sistema", GUILayout.Height(30)))
             {
-                // 1. Creamos UN solo objeto para todo el sistema
                 GameObject go = new GameObject("_NetworkSystem");
-
-                // 2. Le ponemos los DOS componentes necesarios
-                go.AddComponent<CollabNetworkManager>(); // El Cartero
-                go.AddComponent<SceneSyncManager>();     // El Cerebro
-
-                // 3. (Opcional) Evita que se borre si cambias de escena, útil para managers
-                // DontDestroyOnLoad(go); 
-
-                // 4. Guardamos para que no desaparezca al cerrar Unity
-                UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(go.scene);
-
-                Debug.Log("<color=green>Sistema inicializado: _NetworkSystem creado con ambos scripts.</color>");
+                go.AddComponent<CollabNetworkManager>();
+                go.AddComponent<SceneSyncManager>();
+                Debug.Log("Sistema creado.");
             }
         }
         else
         {
-            // --- SECCIÓN 2: CONTROLES DE SESIÓN ---
-            GUILayout.Label("Eres el Host (Líder)", EditorStyles.label);
-            if (GUILayout.Button("Crear Nueva Sesión", GUILayout.Height(40)))
+            if (!CollabNetworkManager.Instance.IsConnected)
             {
-                CreateSession();
+                // SECCIÓN HOST
+                GUILayout.Label("Opción A: Ser el Host (Crear)", EditorStyles.boldLabel);
+                if (GUILayout.Button("Crear Sesión", GUILayout.Height(30)))
+                {
+                    CreateSession();
+                }
+
+                GUILayout.Space(15);
+
+                // SECCIÓN CLIENTE
+                GUILayout.Label("Opción B: Unirse (Cliente)", EditorStyles.boldLabel);
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Código:", GUILayout.Width(50));
+                joinCode = EditorGUILayout.TextField(joinCode, GUILayout.Height(20));
+                GUILayout.EndHorizontal();
+
+                if (GUILayout.Button("Unirse a Sesión", GUILayout.Height(30)))
+                {
+                    JoinSession();
+                }
             }
-
-            GUILayout.Space(20);
-            GUILayout.Label("_____________________________", EditorStyles.centeredGreyMiniLabel);
-            GUILayout.Space(20);
-
-            GUILayout.Label("Eres un Cliente (Colaborador)", EditorStyles.label);
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Código:", GUILayout.Width(50));
-            joinCode = EditorGUILayout.TextField(joinCode, GUILayout.Height(20));
-            GUILayout.EndHorizontal();
-
-            if (GUILayout.Button("Unirse a Sesión", GUILayout.Height(30)))
+            else
             {
-                JoinSession();
-            }
+                GUILayout.Space(10);
+                if (GUILayout.Button("Desconectar", GUILayout.Height(30)))
+                {
+                    CollabNetworkManager.Instance.Shutdown();
+                    status = "Desconectado";
+                }
 
-            GUILayout.Space(10);
-            if (GUILayout.Button("Desconectar / Resetear", GUILayout.Height(20)))
-            {
-                CollabNetworkManager.Instance.Shutdown();
-                status = "Desconectado";
+                GUILayout.Space(5);
+                EditorGUILayout.HelpBox("¡Conectado! Mueve objetos en la escena para sincronizar.", MessageType.Info);
+
+                if (!string.IsNullOrEmpty(CollabNetworkManager.Instance.CurrentLobbyCode))
+                {
+                    EditorGUILayout.TextField("Código de Sala:", CollabNetworkManager.Instance.CurrentLobbyCode);
+                }
             }
         }
 
         EditorGUILayout.EndScrollView();
     }
 
+    // Funciones Async Wrapper para los botones
     async void CreateSession()
     {
         if (CollabNetworkManager.Instance == null) return;
+        status = "Iniciando servicios...";
 
-        status = "Creando sala...";
         string code = await CollabNetworkManager.Instance.CreateSession();
 
         if (!string.IsNullOrEmpty(code))
         {
-            status = $"Hospedando. Código: {code}";
+            status = "CONECTADO (HOST)";
             GUIUtility.systemCopyBuffer = code;
-            Debug.Log($"<color=green>Sala creada. Código {code} copiado al portapapeles.</color>");
+            Debug.Log($"<color=green>Sala creada. Código {code} copiado.</color>");
         }
         else
         {
-            status = "Error al crear (mira la consola)";
+            status = "Error al crear (ver consola)";
         }
     }
 
     async void JoinSession()
     {
         if (CollabNetworkManager.Instance == null || string.IsNullOrEmpty(joinCode)) return;
+        status = "Conectando...";
 
-        status = "Uniéndose...";
         bool success = await CollabNetworkManager.Instance.JoinSession(joinCode);
 
-        if (success) status = "Conectado";
-        else status = "Error al unirse";
+        if (success)
+        {
+            status = "CONECTADO (CLIENTE)";
+        }
+        else
+        {
+            status = "Error al unirse (ver consola)";
+        }
     }
 }
 #endif
