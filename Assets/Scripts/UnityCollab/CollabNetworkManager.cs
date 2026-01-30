@@ -16,7 +16,7 @@ using Unity.Collections;
 using UnityEditor;
 #endif
 
-[ExecuteAlways]
+[ExecuteAlways] // Esto permite que funcione SIN Play Mode
 public class CollabNetworkManager : MonoBehaviour
 {
     public static CollabNetworkManager Instance;
@@ -36,6 +36,7 @@ public class CollabNetworkManager : MonoBehaviour
     void OnEnable()
     {
         Instance = this;
+        // Nos enganchamos al bucle del editor para funcionar sin Play
 #if UNITY_EDITOR
         EditorApplication.update += UpdateNetworkLoop;
 #endif
@@ -46,32 +47,28 @@ public class CollabNetworkManager : MonoBehaviour
 #if UNITY_EDITOR
         EditorApplication.update -= UpdateNetworkLoop;
 #endif
-        _ = Shutdown(); // Cierre seguro
+        _ = Shutdown();
     }
 
-    // --- 1. INICIALIZACIÓN (CORREGIDA) ---
+    // --- 1. INICIALIZACIÓN ---
     public async Task InitializeServices()
     {
         if (UnityServices.State == ServicesInitializationState.Initialized) return;
 
         InitializationOptions options = new InitializationOptions();
-
-        // [CORRECCIÓN CRÍTICA]
-        // Antes usabas el nombre de la carpeta. Eso causaba el conflicto de identidad.
-        // Ahora usamos un número aleatorio para garantizar que Host y Cliente sean distintos.
-        string randomProfile = "User_" + UnityEngine.Random.Range(1000, 999999);
+        // Perfil aleatorio para evitar conflictos de "Usuario duplicado"
+        string randomProfile = "Dev_" + UnityEngine.Random.Range(1000, 999999);
         options.SetProfile(randomProfile);
 
         try
         {
             await UnityServices.InitializeAsync(options);
-
             if (!AuthenticationService.Instance.IsSignedIn)
             {
                 await AuthenticationService.Instance.SignInAnonymouslyAsync();
             }
             playerId = AuthenticationService.Instance.PlayerId;
-            Debug.Log($"<color=cyan>[Collab] Conectado como: {randomProfile} (ID Único)</color>");
+            Debug.Log($"<color=cyan>[MODO EDITOR] Conectado como: {randomProfile}</color>");
         }
         catch (Exception e)
         {
@@ -115,27 +112,23 @@ public class CollabNetworkManager : MonoBehaviour
     // --- 3. UNIRSE A SESIÓN ---
     public async Task<bool> JoinSession(string lobbyCode)
     {
-        // Limpiamos cualquier conexión previa para evitar el error "Resetting event queue"
         await Shutdown();
-
         await InitializeServices();
 
         try
         {
-            Debug.Log($"Buscando sala {lobbyCode}...");
             Lobby lobby = await LobbyService.Instance.JoinLobbyByCodeAsync(lobbyCode);
-
             currentLobbyId = lobby.Id;
             CurrentLobbyCode = lobby.LobbyCode;
 
             string relayJoinCode = lobby.Data["RelayJoinCode"].Value;
-
             JoinAllocation joinAllocation = await RelayService.Instance.JoinAllocationAsync(relayJoinCode);
+
             relayServerData = new RelayServerData(joinAllocation, "dtls");
             BindTransport(relayServerData, false);
 
             IsConnected = true;
-            Debug.Log("<color=green>¡CONECTADO CON ÉXITO!</color>");
+            Debug.Log("<color=green>¡CONECTADO EN MODO EDITOR!</color>");
             return true;
         }
         catch (Exception e)
@@ -146,7 +139,6 @@ public class CollabNetworkManager : MonoBehaviour
         }
     }
 
-    // --- 4. RED Y TRANSPORTE ---
     private void BindTransport(RelayServerData relayData, bool isHost)
     {
         if (driver.IsCreated) driver.Dispose();
@@ -160,7 +152,7 @@ public class CollabNetworkManager : MonoBehaviour
 
         if (isHost)
         {
-            if (driver.Bind(NetworkEndPoint.AnyIpv4) != 0) Debug.LogError("Host Bind Falló");
+            if (driver.Bind(NetworkEndPoint.AnyIpv4) != 0) Debug.LogError("Bind falló");
             else driver.Listen();
         }
         else
@@ -170,20 +162,24 @@ public class CollabNetworkManager : MonoBehaviour
         }
     }
 
+    // --- 4. BUCLE DE RED (IMPORTANTE PARA EDIT MODE) ---
     private void UpdateNetworkLoop()
     {
         if (!IsConnected || !driver.IsCreated) return;
 
-        // Completamos el trabajo del frame anterior
+        // [TRUCO CLAVE] 
+        // Si estamos en el editor y NO estamos dando Play, obligamos a Unity 
+        // a actualizarse constantemente para procesar la red.
+#if UNITY_EDITOR
+        if (!EditorApplication.isPlaying)
+        {
+            EditorApplication.QueuePlayerLoopUpdate();
+        }
+#endif
+
         driver.ScheduleUpdate().Complete();
-
-        // Limpieza de conexiones muertas
         CleanConnections();
-
-        // Aceptamos nuevas conexiones (si somos host)
         AcceptNewConnections();
-
-        // Procesamos mensajes
         ProcessMessages();
     }
 
@@ -204,13 +200,12 @@ public class CollabNetworkManager : MonoBehaviour
 
                     if (SceneSyncManager.Instance != null)
                     {
-                        var data = JsonUtility.FromJson<SceneChangeData>(json);
-                        SceneSyncManager.Instance.ApplyChange(data);
+                        // Procesamos el mensaje aunque estemos en Edit Mode
+                        SceneSyncManager.Instance.ApplyChange(data: JsonUtility.FromJson<SceneChangeData>(json));
                     }
                 }
                 else if (cmd == NetworkEvent.Type.Disconnect)
                 {
-                    Debug.Log("Alguien se desconectó.");
                     connections[i] = default(NetworkConnection);
                 }
             }
@@ -255,19 +250,14 @@ public class CollabNetworkManager : MonoBehaviour
     public async Task Shutdown()
     {
         IsConnected = false;
-
-        // Limpiamos drivers
         if (driver.IsCreated) driver.Dispose();
         if (connections.IsCreated) connections.Dispose();
 
-        // Salimos del Lobby
         if (!string.IsNullOrEmpty(currentLobbyId) && playerId != null)
         {
             try { await LobbyService.Instance.RemovePlayerAsync(currentLobbyId, playerId); }
             catch { }
         }
-
         currentLobbyId = null;
-        // No reseteamos playerId para no perder la sesión de Auth
     }
 }
