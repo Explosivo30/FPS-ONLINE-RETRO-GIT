@@ -1,16 +1,8 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using UnityEngine;
-using Unity.Services.Core;
-using Unity.Services.Authentication;
-using Unity.Services.Lobbies;
-using Unity.Services.Lobbies.Models;
-using Unity.Services.Relay;
-using Unity.Services.Relay.Models;
-using Unity.Networking.Transport;
-using Unity.Networking.Transport.Relay;
-using Unity.Collections;
+using UnityEngine.Networking;
 
 #if UNITY_EDITOR
 using UnityEditor;
@@ -20,268 +12,209 @@ using UnityEditor;
 public class CollabNetworkManager : MonoBehaviour
 {
     public static CollabNetworkManager Instance;
-    private const string LOBBY_NAME = "CollabSession";
-    private const int MAX_PLAYERS = 4;
 
+    // Tu URL de Firebase (se pondrá desde la ventana)
+    public string databaseURL = "";
+    public string sessionID = "default_session";
     public bool IsConnected { get; private set; } = false;
-    public string CurrentLobbyCode { get; private set; }
 
-    // Variables de sesión
-    private string currentLobbyId;
-    private string playerId;
-
-    // Variables de Red
-    private NetworkDriver driver;
-    private NativeList<NetworkConnection> connections;
-    private RelayServerData relayServerData;
+    // Control de tiempo para no saturar internet
+    private double lastUpdate = 0;
+    private float syncInterval = 0.2f; // Sincroniza 5 veces por segundo (suficiente para editor)
 
     void OnEnable()
     {
         Instance = this;
-        // IMPORTANTE: Nos enganchamos al update del editor directamente
 #if UNITY_EDITOR
-        EditorApplication.update -= NetworkTick; // Limpieza preventiva
-        EditorApplication.update += NetworkTick;
+        EditorApplication.update += NetworkLoop;
 #endif
     }
 
     void OnDisable()
     {
 #if UNITY_EDITOR
-        EditorApplication.update -= NetworkTick;
+        EditorApplication.update -= NetworkLoop;
 #endif
-        _ = Shutdown();
+        IsConnected = false;
     }
 
-    // --- 1. INICIALIZACIÓN ---
-    public async Task<bool> InitializeServices()
+    public void ConnectToFirebase(string url, string session)
     {
-        if (UnityServices.State == ServicesInitializationState.Initialized) return true;
+        // Limpiamos la URL por si tiene barras al final
+        if (url.EndsWith("/")) url = url.Substring(0, url.Length - 1);
 
-        InitializationOptions options = new InitializationOptions();
-        // ID Aleatorio para evitar conflictos de "Usuario duplicado"
-        string randomProfile = "EditorUser_" + UnityEngine.Random.Range(1000, 999999);
-        options.SetProfile(randomProfile);
+        databaseURL = url;
+        sessionID = session;
+        IsConnected = true;
 
-        try
-        {
-            await UnityServices.InitializeAsync(options);
+        Debug.Log($"<color=cyan>[Firebase] Conectado a sala: {session}</color>");
 
-            if (!AuthenticationService.Instance.IsSignedIn)
-            {
-                await AuthenticationService.Instance.SignInAnonymouslyAsync();
-            }
-
-            playerId = AuthenticationService.Instance.PlayerId;
-            Debug.Log($"<color=cyan>[Collab] Servicios Listos. Perfil: {randomProfile}</color>");
-            return true;
-        }
-        catch (Exception e)
-        {
-            Debug.LogError($"[Collab] Error Init: {e.Message}");
-            return false;
-        }
+        // Al conectar, limpiamos la base de datos vieja para empezar limpio (opcional)
+        // CleanDatabase(); 
     }
 
-    // --- 2. CREAR SESIÓN (HOST) ---
-    public async Task<string> CreateSession()
-    {
-        if (!await InitializeServices()) return null;
-
-        try
-        {
-            // 1. Crear Relay
-            Allocation allocation = await RelayService.Instance.CreateAllocationAsync(MAX_PLAYERS);
-            string joinCode = await RelayService.Instance.GetJoinCodeAsync(allocation.AllocationId);
-
-            // 2. Configurar Transporte
-            relayServerData = new RelayServerData(allocation, "dtls");
-            BindTransport(relayServerData, true);
-
-            // 3. Crear Lobby
-            CreateLobbyOptions options = new CreateLobbyOptions();
-            options.Data = new Dictionary<string, DataObject> {
-                { "RelayJoinCode", new DataObject(DataObject.VisibilityOptions.Member, joinCode) }
-            };
-
-            Lobby lobby = await LobbyService.Instance.CreateLobbyAsync(LOBBY_NAME, MAX_PLAYERS, options);
-            currentLobbyId = lobby.Id;
-            CurrentLobbyCode = lobby.LobbyCode;
-
-            IsConnected = true;
-            Debug.Log($"<color=green>[HOST] Sala creada: {CurrentLobbyCode}</color>");
-
-            // TRUCO: Forzamos un repintado inmediato para evitar congelación
-#if UNITY_EDITOR
-            EditorApplication.QueuePlayerLoopUpdate();
-#endif
-            return CurrentLobbyCode;
-        }
-        catch (Exception e)
-        {
-            Debug.LogError($"Error creando sesión: {e.Message}");
-            await Shutdown();
-            return null;
-        }
-    }
-
-    // --- 3. UNIRSE A SESIÓN (CLIENTE) ---
-    public async Task<bool> JoinSession(string lobbyCode)
-    {
-        await Shutdown(); // Limpieza preventiva
-        if (!await InitializeServices()) return false;
-
-        try
-        {
-            Debug.Log($"Buscando sala {lobbyCode}...");
-            Lobby lobby = await LobbyService.Instance.JoinLobbyByCodeAsync(lobbyCode);
-
-            currentLobbyId = lobby.Id;
-            CurrentLobbyCode = lobby.LobbyCode;
-
-            string relayJoinCode = lobby.Data["RelayJoinCode"].Value;
-
-            JoinAllocation joinAllocation = await RelayService.Instance.JoinAllocationAsync(relayJoinCode);
-            relayServerData = new RelayServerData(joinAllocation, "dtls");
-            BindTransport(relayServerData, false);
-
-            IsConnected = true;
-            Debug.Log("<color=green>[CLIENTE] ¡Conectado!</color>");
-
-#if UNITY_EDITOR
-            EditorApplication.QueuePlayerLoopUpdate();
-#endif
-            return true;
-        }
-        catch (Exception e)
-        {
-            Debug.LogError($"Error uniéndose: {e.Message}");
-            await Shutdown();
-            return false;
-        }
-    }
-
-    // --- 4. LÓGICA DE RED (EL CORAZÓN) ---
-    private void BindTransport(RelayServerData relayData, bool isHost)
-    {
-        if (driver.IsCreated) driver.Dispose();
-        if (connections.IsCreated) connections.Dispose();
-
-        var settings = new NetworkSettings();
-        settings.WithRelayParameters(ref relayData);
-
-        driver = NetworkDriver.Create(settings);
-        connections = new NativeList<NetworkConnection>(MAX_PLAYERS, Allocator.Persistent);
-
-        if (isHost)
-        {
-            if (driver.Bind(NetworkEndPoint.AnyIpv4) != 0) Debug.LogError("Host Bind Falló");
-            else driver.Listen();
-        }
-        else
-        {
-            driver.Bind(NetworkEndPoint.AnyIpv4);
-            driver.Connect(relayData.Endpoint);
-        }
-    }
-
-    // Esta función se ejecuta CADA FRAME DEL EDITOR
-    private void NetworkTick()
-    {
-        // Si no estamos conectados o el driver no existe, no hacemos nada
-        if (!IsConnected || !driver.IsCreated) return;
-
-        // IMPORTANTE: Obligamos a Unity a redibujar y procesar eventos
-        // Esto evita que la conexión muera por inactividad
-#if UNITY_EDITOR
-        if (!EditorApplication.isPlaying)
-        {
-            EditorApplication.QueuePlayerLoopUpdate();
-        }
-#endif
-
-        driver.ScheduleUpdate().Complete();
-        CleanConnections();
-        AcceptNewConnections();
-        ProcessMessages();
-    }
-
-    private void ProcessMessages()
-    {
-        DataStreamReader stream;
-        for (int i = 0; i < connections.Length; i++)
-        {
-            if (!connections[i].IsCreated) continue;
-
-            NetworkEvent.Type cmd;
-            while ((cmd = driver.PopEventForConnection(connections[i], out stream)) != NetworkEvent.Type.Empty)
-            {
-                if (cmd == NetworkEvent.Type.Data)
-                {
-                    var rawString = stream.ReadFixedString4096();
-                    string json = rawString.ToString();
-
-                    if (SceneSyncManager.Instance != null)
-                    {
-                        var data = JsonUtility.FromJson<SceneChangeData>(json);
-                        SceneSyncManager.Instance.ApplyChange(data);
-                    }
-                }
-                else if (cmd == NetworkEvent.Type.Disconnect)
-                {
-                    Debug.Log("Desconexión detectada.");
-                    connections[i] = default(NetworkConnection);
-                }
-            }
-        }
-    }
-
-    public void BroadcastData(string json)
-    {
-        if (!IsConnected || !driver.IsCreated) return;
-        var fixedString = new FixedString4096Bytes(json);
-        for (int i = 0; i < connections.Length; i++)
-        {
-            if (connections[i].IsCreated)
-            {
-                driver.BeginSend(connections[i], out var writer);
-                writer.WriteFixedString4096(fixedString);
-                driver.EndSend(writer);
-            }
-        }
-    }
-
-    private void CleanConnections()
-    {
-        for (int i = 0; i < connections.Length; i++)
-        {
-            if (!connections[i].IsCreated)
-            {
-                connections.RemoveAtSwapBack(i); --i;
-            }
-        }
-    }
-
-    private void AcceptNewConnections()
-    {
-        NetworkConnection c;
-        while ((c = driver.Accept()) != default(NetworkConnection))
-        {
-            connections.Add(c);
-        }
-    }
-
-    public async Task Shutdown()
+    public void Shutdown()
     {
         IsConnected = false;
-        if (driver.IsCreated) driver.Dispose();
-        if (connections.IsCreated) connections.Dispose();
+        Debug.Log("[Firebase] Desconectado.");
+    }
 
-        if (!string.IsNullOrEmpty(currentLobbyId) && playerId != null)
+    // --- BUCLE PRINCIPAL (Funciona en EDIT MODE) ---
+    private void NetworkLoop()
+    {
+        if (!IsConnected || string.IsNullOrEmpty(databaseURL)) return;
+
+        // Comprobamos si toca actualizar (polling)
+        double time = EditorApplication.timeSinceStartup;
+        if (time - lastUpdate > syncInterval)
         {
-            try { await LobbyService.Instance.RemovePlayerAsync(currentLobbyId, playerId); }
-            catch { }
+            lastUpdate = time;
+            // Descargamos cambios
+            DownloadChanges();
         }
-        currentLobbyId = null;
+    }
+
+    // --- ENVIAR DATOS (SUBIDA) ---
+    public void BroadcastData(string json)
+    {
+        if (!IsConnected) return;
+
+        // Parseamos para sacar el ID del objeto y guardarlo individualmente
+        // Esto evita sobrescribir todo el JSON gigante
+        SceneChangeData data = JsonUtility.FromJson<SceneChangeData>(json);
+
+        string endpoint = $"{databaseURL}/{sessionID}/objects/{data.objectID}.json";
+
+        // Usamos PUT para actualizar ese objeto específico
+        StartCoroutine(PutRequest(endpoint, json));
+    }
+
+    IEnumerator PutRequest(string url, string bodyJson)
+    {
+        using (UnityWebRequest request = UnityWebRequest.Put(url, bodyJson))
+        {
+            request.SetRequestHeader("Content-Type", "application/json");
+            yield return request.SendWebRequest();
+
+            if (request.result != UnityWebRequest.Result.Success)
+            {
+                // Debug.LogError($"Error subida: {request.error}");
+                // Silenciamos errores comunes para no saturar
+            }
+        }
+    }
+
+    // --- RECIBIR DATOS (BAJADA) ---
+    void DownloadChanges()
+    {
+        string endpoint = $"{databaseURL}/{sessionID}/objects.json";
+        StartCoroutine(GetRequest(endpoint));
+    }
+
+    IEnumerator GetRequest(string url)
+    {
+        using (UnityWebRequest request = UnityWebRequest.Get(url))
+        {
+            yield return request.SendWebRequest();
+
+            if (request.result == UnityWebRequest.Result.Success)
+            {
+                string json = request.downloadHandler.text;
+                if (json != "null" && !string.IsNullOrEmpty(json))
+                {
+                    ProcessFirebaseJSON(json);
+                }
+            }
+        }
+    }
+
+    // Firebase devuelve un JSON raro: {"id1":{data}, "id2":{data}}. Hay que limpiarlo.
+    void ProcessFirebaseJSON(string json)
+    {
+        // Truco rápido: En lugar de usar librerías JSON externas complejas,
+        // vamos a envolver esto para que Unity pueda leerlo, o iterar manualmente.
+
+        // Como Unity JsonUtility es muy básico y no maneja diccionarios,
+        // vamos a hacer un parseo muy simple basado en corchetes.
+        // NOTA: Para producción usaríamos Newtonsoft.Json, pero aquí queremos cero dependencias.
+
+        // Si el SceneSyncManager existe, le pasamos los datos
+        if (SceneSyncManager.Instance != null)
+        {
+            // Este es un hack sucio pero funcional para evitar instalar paquetes:
+            // Dividimos el JSON por objetos.
+            // Firebase devuelve: {"ObjID_1": {...contenido...}, "ObjID_2": {...}}
+
+            // 1. Quitamos corchete inicial y final
+            if (json.Length < 5) return;
+            string clean = json.Substring(1, json.Length - 2);
+
+            // 2. Buscamos patrones de objetos
+            // Esto requeriría un parser real. Para simplificar al máximo y que funcione YA:
+            // Vamos a confiar en que el SceneSyncManager ignora su propio ID si no ha cambiado.
+
+            // Solución robusta sin plugins:
+            // Simplemente pasamos el JSON crudo al SyncManager y dejamos que él intente extraer info
+            // O mejor: Modificamos el SyncManager para que no necesite un parser complejo.
+
+            // *PARCHE TEMPORAL*: Solo funcionará bien si movemos de 1 en 1.
+            // Para arreglar esto bien necesitamos un parser.
+            // Pero espera... ¡Podemos usar "SimpleJSON" o similar!
+            // O mejor aún, parseamos manualmente lo básico.
+
+            // Vamos a intentar extraer objetos individuales buscando las llaves
+            int depth = 0;
+            string currentObj = "";
+            bool insideObject = false;
+
+            for (int i = 0; i < clean.Length; i++)
+            {
+                char c = clean[i];
+                if (c == '{') { depth++; insideObject = true; }
+                if (c == '}') { depth--; }
+
+                if (insideObject) currentObj += c;
+
+                if (depth == 0 && insideObject)
+                {
+                    // Fin de un objeto json
+                    try
+                    {
+                        SceneChangeData data = JsonUtility.FromJson<SceneChangeData>(currentObj);
+                        SceneSyncManager.Instance.ApplyChange(data);
+                    }
+                    catch { }
+
+                    currentObj = "";
+                    insideObject = false;
+                    // Saltamos comas y comillas hasta el siguiente {
+                }
+            }
+        }
+    }
+
+    // Helper para lanzar corrutinas en modo editor
+    public new void StartCoroutine(IEnumerator routine)
+    {
+#if UNITY_EDITOR
+        // Usamos una implementación dummy muy simple para ejecutar el IEnumerator paso a paso
+        EditorParallelRun(routine);
+#endif
+    }
+
+    // Ejecutor de "Corrutinas" para Editor sin Play Mode
+    private async void EditorParallelRun(IEnumerator routine)
+    {
+        while (routine.MoveNext())
+        {
+            if (routine.Current is UnityWebRequestAsyncOperation op)
+            {
+                while (!op.isDone) await System.Threading.Tasks.Task.Delay(10);
+            }
+            else
+            {
+                await System.Threading.Tasks.Task.Delay(10);
+            }
+        }
     }
 }

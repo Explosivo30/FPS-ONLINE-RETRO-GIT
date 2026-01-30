@@ -1,7 +1,6 @@
 using UnityEngine;
 using System.Collections.Generic;
 
-// 1. IMPORTANTE: Envolvemos el using de UnityEditor
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
@@ -10,16 +9,12 @@ using UnityEditor;
 public class SceneSyncManager : MonoBehaviour
 {
     public static SceneSyncManager Instance;
-
     private bool isApplyingNetworkChange = false;
-
     private Dictionary<string, Vector3> lastPositions = new Dictionary<string, Vector3>();
-    private Dictionary<string, Quaternion> lastRotations = new Dictionary<string, Quaternion>();
 
     void OnEnable()
     {
         Instance = this;
-        // 2. Solo nos suscribimos al update del Editor si estamos en el Editor
 #if UNITY_EDITOR
         EditorApplication.update += MonitorSelectedObjects;
 #endif
@@ -27,115 +22,96 @@ public class SceneSyncManager : MonoBehaviour
 
     void OnDisable()
     {
-        // 3. Lo mismo para desuscribirnos
 #if UNITY_EDITOR
         EditorApplication.update -= MonitorSelectedObjects;
 #endif
     }
 
-    // --- 1. ENVIAR (Detectar movimiento local) ---
-    // 4. Toda esta función usa Selection, así que la ocultamos del juego final
-#if UNITY_EDITOR
+    // --- ENVIAR ---
     private void MonitorSelectedObjects()
     {
         if (isApplyingNetworkChange) return;
-
-        // Verificamos si el Manager existe antes de intentar usarlo
         if (CollabNetworkManager.Instance == null || !CollabNetworkManager.Instance.IsConnected) return;
 
-        // AQUÍ estaba el error: Selection no existe fuera del editor
+#if UNITY_EDITOR
         foreach (GameObject go in Selection.gameObjects)
         {
             var idComp = go.GetComponent<SceneObjectIdentifier>();
             if (idComp == null) continue;
 
-            bool hasMoved = false;
+            string id = idComp.UniqueID;
+            Vector3 currentPos = go.transform.position;
 
-            if (!lastPositions.ContainsKey(idComp.UniqueID) || Vector3.Distance(lastPositions[idComp.UniqueID], go.transform.position) > 0.001f)
+            if (!lastPositions.ContainsKey(id))
             {
-                lastPositions[idComp.UniqueID] = go.transform.position;
-                hasMoved = true;
+                lastPositions[id] = currentPos;
+                continue;
             }
 
-            if (!lastRotations.ContainsKey(idComp.UniqueID) || Quaternion.Angle(lastRotations[idComp.UniqueID], go.transform.rotation) > 0.1f)
+            if (Vector3.Distance(lastPositions[id], currentPos) > 0.01f)
             {
-                lastRotations[idComp.UniqueID] = go.transform.rotation;
-                hasMoved = true;
-            }
+                // Ha habido movimiento -> ENVIAR
+                SceneChangeData data = new SceneChangeData();
+                data.type = "transform";
+                data.objectID = id;
+                data.value = JsonUtility.ToJson(new SerializableVector3(currentPos));
+                data.timestamp = System.DateTime.Now.Ticks;
 
-            if (hasMoved)
-            {
-                SendTransformUpdate(go, idComp.UniqueID);
+                string json = JsonUtility.ToJson(data);
+                CollabNetworkManager.Instance.BroadcastData(json);
+
+                lastPositions[id] = currentPos;
             }
         }
-    }
 #endif
-
-    private void SendTransformUpdate(GameObject obj, string id)
-    {
-        // SceneChangeData debe ser accesible, asegúrate de tener esa clase definida
-        SceneChangeData data = new SceneChangeData
-        {
-            type = "transform",
-            objectID = id,
-            value = JsonUtility.ToJson(new SerializableVector3(obj.transform.position)),
-            timestamp = System.DateTime.Now.Ticks
-        };
-
-        string json = JsonUtility.ToJson(data);
-
-        if (CollabNetworkManager.Instance != null)
-        {
-            CollabNetworkManager.Instance.BroadcastData(json);
-        }
     }
 
-    // --- 2. RECIBIR (Aplicar movimiento remoto) ---
+    // --- RECIBIR ---
     public void ApplyChange(SceneChangeData data)
     {
-        MainThreadDispatcher.Execute(() =>
+        if (data == null) return;
+
+        // No podemos usar FindObjectsOfType todo el rato, es lento.
+        // Pero para prototipo sirve.
+        SceneObjectIdentifier target = FindObjectById(data.objectID);
+
+        if (target != null)
         {
-            SceneObjectIdentifier target = FindObjectById(data.objectID);
-
-            if (target != null)
+            // Verificamos si realmente hay cambio para evitar parpadeo
+            if (data.type == "transform")
             {
-                isApplyingNetworkChange = true;
+                SerializableVector3 posData = JsonUtility.FromJson<SerializableVector3>(data.value);
+                Vector3 newPos = posData.ToVector3();
 
-                if (data.type == "transform")
+                if (Vector3.Distance(target.transform.position, newPos) > 0.05f)
                 {
-                    SerializableVector3 posData = JsonUtility.FromJson<SerializableVector3>(data.value);
-                    target.transform.position = posData.ToVector3();
+                    isApplyingNetworkChange = true;
+                    target.transform.position = newPos;
 
+                    // Actualizamos nuestro registro local para no re-enviarlo
                     if (lastPositions.ContainsKey(data.objectID))
-                        lastPositions[data.objectID] = target.transform.position;
-                }
+                        lastPositions[data.objectID] = newPos;
+                    else
+                        lastPositions.Add(data.objectID, newPos);
 
-                isApplyingNetworkChange = false;
+                    isApplyingNetworkChange = false;
+
+                    // Forzar repintado en editor
+#if UNITY_EDITOR
+                    if (!Application.isPlaying) EditorUtility.SetDirty(target.transform);
+#endif
+                }
             }
-        });
+        }
     }
 
     private SceneObjectIdentifier FindObjectById(string id)
     {
+        // Optimizacion: Podrías cachear esto, pero FindObjectsOfType es seguro
         foreach (var obj in FindObjectsOfType<SceneObjectIdentifier>())
         {
             if (obj.UniqueID == id) return obj;
         }
         return null;
-    }
-}
-
-public static class MainThreadDispatcher
-{
-    public static void Execute(System.Action action)
-    {
-#if UNITY_EDITOR
-        // En editor usamos esto
-        EditorApplication.delayCall += () => action();
-#else
-        // Si quisieras que funcione en el juego compilado (runtime),
-        // aquí necesitarías otra lógica, pero para tu herramienta esto basta:
-        Debug.LogWarning("Esta herramienta solo funciona en el Editor por ahora.");
-#endif
     }
 }
