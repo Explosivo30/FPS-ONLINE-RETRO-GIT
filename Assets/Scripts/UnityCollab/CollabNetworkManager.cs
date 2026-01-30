@@ -20,7 +20,6 @@ using UnityEditor;
 public class CollabNetworkManager : MonoBehaviour
 {
     public static CollabNetworkManager Instance;
-
     private const string LOBBY_NAME = "CollabSession";
     private const int MAX_PLAYERS = 4;
 
@@ -46,21 +45,22 @@ public class CollabNetworkManager : MonoBehaviour
 #if UNITY_EDITOR
         EditorApplication.update -= UpdateNetworkLoop;
 #endif
-        Shutdown();
+        _ = Shutdown();
     }
 
-    // --- 1. Inicialización ---
+    // --- 1. INICIALIZACIÓN (VERSIÓN ARREGLADA) ---
     public async Task InitializeServices()
     {
         if (UnityServices.State == ServicesInitializationState.Initialized) return;
 
         InitializationOptions options = new InitializationOptions();
 
-        // TRUCO FINAL: Usamos un número aleatorio grande. 
-        // Esto asegura que aunque uses la misma cuenta y el mismo PC, 
-        // Unity te vea como un usuario distinto cada vez.
-        string randomProfile = "User_" + UnityEngine.Random.Range(0, 999999).ToString();
+        // --- CAMBIO CLAVE AQUÍ ---
+        // Antes usabas el nombre de la carpeta. ESO ESTABA MAL.
+        // Ahora usamos un número aleatorio. Esto arregla el "Player already in lobby".
+        string randomProfile = "User_" + UnityEngine.Random.Range(1000, 999999);
         options.SetProfile(randomProfile);
+        // -------------------------
 
         try
         {
@@ -71,7 +71,7 @@ public class CollabNetworkManager : MonoBehaviour
                 await AuthenticationService.Instance.SignInAnonymouslyAsync();
             }
             playerId = AuthenticationService.Instance.PlayerId;
-            Debug.Log($"<color=cyan>[Collab] Autenticado. Perfil: {randomProfile} | ID: {playerId}</color>");
+            Debug.Log($"<color=cyan>[Collab] Conectado como: {randomProfile} (ID Único)</color>");
         }
         catch (Exception e)
         {
@@ -79,7 +79,7 @@ public class CollabNetworkManager : MonoBehaviour
         }
     }
 
-    // --- 2. Crear Sesión (Host) ---
+    // --- 2. CREAR SESIÓN ---
     public async Task<string> CreateSession()
     {
         await InitializeServices();
@@ -102,39 +102,25 @@ public class CollabNetworkManager : MonoBehaviour
             CurrentLobbyCode = lobby.LobbyCode;
 
             IsConnected = true;
-
-#if UNITY_EDITOR
-            EditorApplication.QueuePlayerLoopUpdate();
-#endif
             return CurrentLobbyCode;
         }
         catch (Exception e)
         {
-            Debug.LogError($"Error creando sesión: {e.Message}");
-            Shutdown();
+            Debug.LogError($"Error creando: {e.Message}");
+            await Shutdown();
             return null;
         }
     }
 
-    // --- 3. Unirse a Sesión (Cliente) ---
+    // --- 3. UNIRSE A SESIÓN ---
     public async Task<bool> JoinSession(string lobbyCode)
     {
-        // PASO 1: Asegurarnos de que no estamos conectados de antes
-        Shutdown();
-
+        await Shutdown(); // Limpieza preventiva para evitar error rojo
         await InitializeServices();
 
         try
         {
-            // PASO 2: Verificar si ya estamos en ese Lobby (por si acaso)
-            if (!string.IsNullOrEmpty(currentLobbyId))
-            {
-                try { await LobbyService.Instance.RemovePlayerAsync(currentLobbyId, playerId); }
-                catch { /* Ignoramos si falla al salir, es solo limpieza */ }
-                currentLobbyId = null;
-            }
-
-            Debug.Log($"Intentando unirse a: {lobbyCode}...");
+            Debug.Log($"Buscando sala {lobbyCode}...");
             Lobby lobby = await LobbyService.Instance.JoinLobbyByCodeAsync(lobbyCode);
 
             currentLobbyId = lobby.Id;
@@ -147,19 +133,18 @@ public class CollabNetworkManager : MonoBehaviour
             BindTransport(relayServerData, false);
 
             IsConnected = true;
-            Debug.Log("<color=green>CLIENTE: Conexión establecida con Relay.</color>");
+            Debug.Log("<color=green>¡CONECTADO CON ÉXITO!</color>");
             return true;
         }
         catch (Exception e)
         {
             Debug.LogError($"Error uniéndose: {e.Message}");
-            // Si falla, reseteamos todo para que el usuario pueda volver a darle al botón sin errores
-            Shutdown();
+            await Shutdown();
             return false;
         }
     }
 
-    // --- 4. Lógica de Red ---
+    // --- 4. RED Y TRANSPORTE ---
     private void BindTransport(RelayServerData relayData, bool isHost)
     {
         if (driver.IsCreated) driver.Dispose();
@@ -173,10 +158,8 @@ public class CollabNetworkManager : MonoBehaviour
 
         if (isHost)
         {
-            if (driver.Bind(NetworkEndPoint.AnyIpv4) != 0)
-                Debug.LogError("Host Bind Falló");
-            else
-                driver.Listen();
+            if (driver.Bind(NetworkEndPoint.AnyIpv4) != 0) Debug.LogError("Host Bind Falló");
+            else driver.Listen();
         }
         else
         {
@@ -190,23 +173,13 @@ public class CollabNetworkManager : MonoBehaviour
         if (!IsConnected || !driver.IsCreated) return;
 
         driver.ScheduleUpdate().Complete();
+        CleanConnections();
+        AcceptNewConnections();
+        ProcessMessages();
+    }
 
-        for (int i = 0; i < connections.Length; i++)
-        {
-            if (!connections[i].IsCreated)
-            {
-                connections.RemoveAtSwapBack(i);
-                --i;
-            }
-        }
-
-        NetworkConnection c;
-        while ((c = driver.Accept()) != default(NetworkConnection))
-        {
-            connections.Add(c);
-        }
-
-        // --- PROCESAMIENTO DE MENSAJES (AQUÍ ESTABA EL ERROR) ---
+    private void ProcessMessages()
+    {
         DataStreamReader stream;
         for (int i = 0; i < connections.Length; i++)
         {
@@ -217,43 +190,27 @@ public class CollabNetworkManager : MonoBehaviour
             {
                 if (cmd == NetworkEvent.Type.Data)
                 {
-                    // >>> CORRECCIÓN: Leemos directamente el valor devuelto <<<
                     var rawString = stream.ReadFixedString4096();
                     string json = rawString.ToString();
-
-                    Debug.Log($"Mensaje recibido: {json}");
 
                     if (SceneSyncManager.Instance != null)
                     {
                         var data = JsonUtility.FromJson<SceneChangeData>(json);
                         SceneSyncManager.Instance.ApplyChange(data);
                     }
-
-                   
                 }
                 else if (cmd == NetworkEvent.Type.Disconnect)
                 {
-                    Debug.Log("Usuario desconectado.");
+                    Debug.Log("Alguien se desconectó.");
                     connections[i] = default(NetworkConnection);
                 }
             }
         }
     }
 
-    void Update()
-    {
-#if UNITY_EDITOR
-        if (!Application.isPlaying && IsConnected)
-        {
-            EditorApplication.QueuePlayerLoopUpdate();
-        }
-#endif
-    }
-
     public void BroadcastData(string json)
     {
         if (!IsConnected || !driver.IsCreated) return;
-
         var fixedString = new FixedString4096Bytes(json);
         for (int i = 0; i < connections.Length; i++)
         {
@@ -266,9 +223,29 @@ public class CollabNetworkManager : MonoBehaviour
         }
     }
 
-    public async void Shutdown()
+    private void CleanConnections()
+    {
+        for (int i = 0; i < connections.Length; i++)
+        {
+            if (!connections[i].IsCreated)
+            {
+                connections.RemoveAtSwapBack(i); --i;
+            }
+        }
+    }
+    private void AcceptNewConnections()
+    {
+        NetworkConnection c;
+        while ((c = driver.Accept()) != default(NetworkConnection))
+        {
+            connections.Add(c);
+        }
+    }
+
+    public async Task Shutdown()
     {
         IsConnected = false;
+        // Limpiamos agresivamente para evitar el error rojo de "Pending Events"
         if (driver.IsCreated) driver.Dispose();
         if (connections.IsCreated) connections.Dispose();
 
