@@ -141,35 +141,53 @@ public class CollabNetworkManager : MonoBehaviour
                 Vector3? rot = null;
                 Vector3? scl = null;
 
-                // CASO ESPECIAL: CREACIÓN (Trae todo junto)
+                // === NUEVA LÓGICA DE PARSEO PARA "create" ===
                 if (type == "create")
                 {
-                    // Sacamos el JSON interno que hay dentro de "value"
-                    string fullStateJson = ExtractString(cleanEntry, "\"value\":");
-                    if (!string.IsNullOrEmpty(fullStateJson))
-                    {
-                        // Como hemos metido un JSON dentro de otro string, le quitamos los escapes extra si los tiene
-                        fullStateJson = fullStateJson.Replace("\\\"", "\"");
+                    // Sacamos el string en formato "1,2,3|0,90,0|1,1,1"
+                    // Al no tener comillas internas, ExtractString funciona perfecto
+                    string rawPayload = ExtractString(cleanEntry, "\"value\":");
 
-                        pos = ExtractVector3(fullStateJson, "\"pos\":");
-                        rot = ExtractVector3(fullStateJson, "\"rot\":");
-                        scl = ExtractVector3(fullStateJson, "\"scl\":");
+                    if (!string.IsNullOrEmpty(rawPayload))
+                    {
+                        string[] parts = rawPayload.Split('|');
+                        if (parts.Length >= 3)
+                        {
+                            pos = StringToVector3(parts[0]);
+                            rot = StringToVector3(parts[1]);
+                            scl = StringToVector3(parts[2]);
+                        }
                     }
                 }
                 else
                 {
-                    // CASO NORMAL (Movimiento, Rotación o Escala sueltos)
+                    // Lógica antigua para movimientos sueltos
                     Vector3? val = ExtractVector3(cleanEntry, "\"value\":");
                     if (type == "transform") pos = val;
                     if (type == "rotation") rot = val;
                     if (type == "scale") scl = val;
                 }
 
-                // Enviamos TODO al SceneSyncManager
                 SceneSyncManager.Instance.ApplyFullState(id, pos, rot, scl, matInfo, prefabInfo);
             }
             catch (Exception) { }
         }
+    }
+
+    // --- NUEVO HELPER PARA PARSEAR TEXTO PLANO ---
+    private Vector3? StringToVector3(string s)
+    {
+        try
+        {
+            string[] nums = s.Split(',');
+            if (nums.Length < 3) return null;
+            return new Vector3(
+                float.Parse(nums[0], System.Globalization.CultureInfo.InvariantCulture),
+                float.Parse(nums[1], System.Globalization.CultureInfo.InvariantCulture),
+                float.Parse(nums[2], System.Globalization.CultureInfo.InvariantCulture)
+            );
+        }
+        catch { return null; }
     }
 
     // --- PARSERS MANUALES ---
