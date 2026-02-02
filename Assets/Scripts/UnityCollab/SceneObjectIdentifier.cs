@@ -8,9 +8,6 @@ public class SceneObjectIdentifier : MonoBehaviour
 {
     public string UniqueID;
 
-    // Guardamos "quién era yo" para detectar si me han clonado
-    [SerializeField, HideInInspector] private int originalInstanceID = 0;
-
     [HideInInspector]
     public bool hasUnsyncedChanges = false;
 
@@ -20,46 +17,85 @@ public class SceneObjectIdentifier : MonoBehaviour
     }
 
 #if UNITY_EDITOR
+    // Este evento salta cuando cambias algo en el inspector O cuando DUPLICAS el objeto
     private void OnValidate()
     {
-        // Esto ocurre justo después de duplicar o pegar
-        ValidateID();
+        // Usamos delayCall para esperar a que Unity termine de hacer la copia
+        EditorApplication.delayCall += ValidateID;
     }
 #endif
 
     public void ValidateID()
     {
-        int currentInstanceID = GetInstanceID();
+        // Seguridad: si el objeto se está borrando, no hacemos nada
+        if (this == null) return;
 
-        // CASO 1: No tengo ID (soy nuevo) -> Generar
+        // 1. Evitar cambiar IDs a los archivos Prefab del proyecto (solo instancias en escena)
+        if (IsPrefabAsset()) return;
+
+        bool generateNew = false;
+
+        // 2. ¿No tengo DNI? -> Generar
         if (string.IsNullOrEmpty(UniqueID))
         {
-            GenerateID();
+            generateNew = true;
         }
-        // CASO 2: Tengo ID, pero mi InstanceID ha cambiado (SOY UN CLON) -> Regenerar
-        else if (originalInstanceID != 0 && originalInstanceID != currentInstanceID)
+        // 3. ¿Tengo DNI, pero ya lo tiene otro objeto en la escena? -> Generar (Soy un clon)
+        else if (IsDuplicate(UniqueID))
+        {
+            generateNew = true;
+        }
+
+        if (generateNew)
         {
             string oldID = UniqueID;
             GenerateID();
-            Debug.Log($"[Collab] Detectado duplicado. ID cambiado de {oldID} a {UniqueID}");
 
-            // Importante: Marcar como "nuevo" para que el AutoTagger lo suba
-            // Esperamos un frame para que el Tagger lo pille
+            // Solo avisamos si ha cambiado (no si era nuevo)
+            if (!string.IsNullOrEmpty(oldID))
+                Debug.Log($"[Collab] Clon detectado. ID cambiado: {oldID} -> {UniqueID}");
+
+            // MAGIA: Avisamos al Manager para que suba este nuevo objeto YA
 #if UNITY_EDITOR
-            EditorApplication.delayCall += () => {
-                if (SceneSyncManager.Instance != null) SceneSyncManager.Instance.UploadNewObject(this.gameObject);
-            };
+            if (SceneSyncManager.Instance != null)
+                SceneSyncManager.Instance.UploadNewObject(this.gameObject);
 #endif
         }
+    }
+
+    private bool IsDuplicate(string idToCheck)
+    {
+        // Buscamos TODOS los identificadores en la escena
+        // (Es fuerza bruta, pero seguro al 100% contra duplicados)
+        var allIdentifiers = FindObjectsOfType<SceneObjectIdentifier>();
+
+        foreach (var other in allIdentifiers)
+        {
+            // Si encuentro otro objeto QUE NO SOY YO y tiene MI MISMO ID...
+            if (other != this && other.UniqueID == idToCheck)
+            {
+                return true; // ¡Hay un duplicado!
+            }
+        }
+        return false;
     }
 
     public void GenerateID()
     {
         UniqueID = System.Guid.NewGuid().ToString();
-        originalInstanceID = GetInstanceID();
-        hasUnsyncedChanges = true; // Al nacer, tengo cambios pendientes
+        hasUnsyncedChanges = true;
 #if UNITY_EDITOR
         if (!Application.isPlaying) EditorUtility.SetDirty(this);
+#endif
+    }
+
+    private bool IsPrefabAsset()
+    {
+#if UNITY_EDITOR
+        // Si la escena es nula o no es válida, es un archivo en la carpeta Project, no en la escena
+        return this.gameObject.scene.rootCount == 0 || this.gameObject.scene.name == null;
+#else
+        return false;
 #endif
     }
 }
