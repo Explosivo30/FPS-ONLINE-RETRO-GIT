@@ -121,7 +121,6 @@ public class CollabNetworkManager : MonoBehaviour
         if (string.IsNullOrEmpty(json) || json == "null") return;
         if (SceneSyncManager.Instance == null) return;
 
-        // Limpiamos un poco el JSON para iterar mejor
         var entries = json.Split(new string[] { "{\"type\"" }, StringSplitOptions.RemoveEmptyEntries);
 
         foreach (var entry in entries)
@@ -131,33 +130,45 @@ public class CollabNetworkManager : MonoBehaviour
 
             try
             {
-                // Extraemos datos básicos
                 string id = ExtractString(cleanEntry, "\"objectID\":");
                 string type = ExtractString(cleanEntry, "\"type\":");
-
-                // Extraemos INFO DE CREACIÓN (Prefab/Mesh)
                 string prefabInfo = ExtractString(cleanEntry, "\"prefabGUID\":");
                 string matInfo = ExtractString(cleanEntry, "\"material\":");
 
                 if (string.IsNullOrEmpty(id)) continue;
 
-                // Extraemos valores transform
-                Vector3? pos = ExtractVector3(cleanEntry, "\"value\":");
+                Vector3? pos = null;
+                Vector3? rot = null;
+                Vector3? scl = null;
+
+                // CASO ESPECIAL: CREACIÓN (Trae todo junto)
+                if (type == "create")
+                {
+                    // Sacamos el JSON interno que hay dentro de "value"
+                    string fullStateJson = ExtractString(cleanEntry, "\"value\":");
+                    if (!string.IsNullOrEmpty(fullStateJson))
+                    {
+                        // Como hemos metido un JSON dentro de otro string, le quitamos los escapes extra si los tiene
+                        fullStateJson = fullStateJson.Replace("\\\"", "\"");
+
+                        pos = ExtractVector3(fullStateJson, "\"pos\":");
+                        rot = ExtractVector3(fullStateJson, "\"rot\":");
+                        scl = ExtractVector3(fullStateJson, "\"scl\":");
+                    }
+                }
+                else
+                {
+                    // CASO NORMAL (Movimiento, Rotación o Escala sueltos)
+                    Vector3? val = ExtractVector3(cleanEntry, "\"value\":");
+                    if (type == "transform") pos = val;
+                    if (type == "rotation") rot = val;
+                    if (type == "scale") scl = val;
+                }
 
                 // Enviamos TODO al SceneSyncManager
-                SceneSyncManager.Instance.ApplyFullState(
-                    id,
-                    (type == "transform") ? pos : null,
-                    (type == "rotation") ? pos : null,
-                    (type == "scale") ? pos : null,
-                    matInfo,
-                    prefabInfo // <--- Vital para crear objetos nuevos
-                );
+                SceneSyncManager.Instance.ApplyFullState(id, pos, rot, scl, matInfo, prefabInfo);
             }
-            catch (Exception)
-            {
-                // Ignoramos errores de parseo puntuales
-            }
+            catch (Exception) { }
         }
     }
 

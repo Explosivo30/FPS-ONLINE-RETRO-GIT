@@ -48,7 +48,7 @@ public class SceneSyncManager : MonoBehaviour
         MonitorSelectedObjects();
     }
 
-    // --- FUNCIÓN PÚBLICA: ALGUIEN QUIERE SUBIR UN OBJETO NUEVO ---
+    //ALGUIEN QUIERE SUBIR UN OBJETO NUEVO
     public void UploadNewObject(GameObject go)
     {
         // No lo subimos YA. Lo metemos en la cola para el siguiente frame.
@@ -58,41 +58,47 @@ public class SceneSyncManager : MonoBehaviour
         }
     }
 
-    // --- PROCESADOR DE LA COLA (Se ejecuta en cada update) ---
+    //  PROCESADOR DE LA COLA (Se ejecuta en cada update)
     private void ProcessPendingUploads()
     {
         if (pendingUploads.Count == 0) return;
         if (CollabNetworkManager.Instance == null || !CollabNetworkManager.Instance.IsConnected) return;
 
-        // Copiamos la lista para poder limpiarla mientras iteramos
         GameObject[] processList = pendingUploads.ToArray();
         pendingUploads.Clear();
 
         foreach (GameObject go in processList)
         {
-            if (go == null) continue; // Por si lo borraste antes de subirlo
+            if (go == null) continue;
 
             var idComp = go.GetComponent<SceneObjectIdentifier>();
             if (idComp == null) continue;
 
-            // Forzamos validación final
             idComp.ValidateID();
             string id = idComp.UniqueID;
+            if (string.IsNullOrEmpty(id)) continue;
 
-            Debug.Log($"[Collab] Procesando subida de: {go.name} ({id})");
+            Debug.Log($"[Collab] Subiendo NUEVO objeto (Pack Completo): {go.name}");
 
-            // ENVIAMOS TODO
-            SendData("transform", id, JsonUtility.ToJson(new SerializableVector3(go.transform.position)), go);
-            SendData("rotation", id, JsonUtility.ToJson(new SerializableVector3(go.transform.eulerAngles)), go);
-            SendData("scale", id, JsonUtility.ToJson(new SerializableVector3(go.transform.localScale)), go);
+            // CONSTRUIMOS EL "SUPER-PAQUETE" JSON CON TODO
+            string posJson = JsonUtility.ToJson(new SerializableVector3(go.transform.position));
+            string rotJson = JsonUtility.ToJson(new SerializableVector3(go.transform.eulerAngles));
+            string sclJson = JsonUtility.ToJson(new SerializableVector3(go.transform.localScale));
 
+            // Creamos un JSON manual dentro del campo value
+            string fullStateJson = $"{{\"pos\":{posJson}, \"rot\":{rotJson}, \"scl\":{sclJson}}}";
+
+            // Enviamos tipo "create"
+            SendData("create", id, fullStateJson, go);
+
+            // Registramos material si tiene
             Renderer rend = go.GetComponent<Renderer>();
             if (rend != null && rend.sharedMaterial != null)
             {
                 SendData("material", id, rend.sharedMaterial.name, go);
             }
 
-            // Registramos estado actual para no reenviarlo
+            // Registramos estado actual para que no se reenvíe en el siguiente frame
             lastPositions[id] = go.transform.position;
             lastRotations[id] = go.transform.rotation;
             lastScales[id] = go.transform.localScale;
