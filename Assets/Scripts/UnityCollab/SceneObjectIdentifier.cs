@@ -11,6 +11,9 @@ public class SceneObjectIdentifier : MonoBehaviour
     [HideInInspector]
     public bool hasUnsyncedChanges = false;
 
+    // Bool para que el script sepa que la ID viene de Firebase (Red) y no debe cambiarla
+    private bool _lockedByNetwork = false;
+
     private void Awake()
     {
         ValidateID();
@@ -24,6 +27,19 @@ public class SceneObjectIdentifier : MonoBehaviour
         EditorApplication.delayCall += ValidateID;
     }
 #endif
+
+
+    public void SetNetworkID(string id)
+    {
+        _lockedByNetwork = true; // Bloqueamos validaciones automáticas
+        UniqueID = id;
+        hasUnsyncedChanges = false; // Esto no cuenta como un cambio local
+
+        // Esperamos un poco para desbloquear, por si Unity hace cosas raras al instanciar
+#if UNITY_EDITOR
+        EditorApplication.delayCall += () => { _lockedByNetwork = false; };
+#endif
+    }
 
     public void ValidateID()
     {

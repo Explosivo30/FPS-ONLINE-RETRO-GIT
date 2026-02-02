@@ -16,7 +16,7 @@ public class CollabNetworkManager : MonoBehaviour
     public string sessionID = "default_session";
     public bool IsConnected { get; private set; } = false;
 
-    private float syncInterval = 0.5f;
+    private float syncInterval = 0.2f;
 
     void OnEnable()
     {

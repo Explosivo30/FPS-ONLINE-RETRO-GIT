@@ -290,17 +290,15 @@ public class SceneSyncManager : MonoBehaviour
 
         if (newObj != null)
         {
+            newObj.name = "NetObj_" + data.objectID.Substring(0, 4);
+
+            //OBTENER O AÑADIR EL COMPONENTE
             var idComp = newObj.GetComponent<SceneObjectIdentifier>();
             if (idComp == null) idComp = newObj.AddComponent<SceneObjectIdentifier>();
 
-            idComp.UniqueID = data.objectID;
-            // IMPORTANTE: Evitamos que el nuevo objeto clonado se crea un duplicado
-            SerializedObject so = new SerializedObject(idComp);
-            // Truco: Al crearlo de red, NO queremos que valide ID. Ya tiene ID.
-            // Pero como es ExecuteAlways, validará. 
-            // Así que necesitamos que ValidateID sepa que este objeto está "autorizado".
-            // De momento, confiamos en el ApplyModifiedProperties.
-            so.ApplyModifiedProperties();
+            // FORZAMOS LA ID DE RED E IGNORAMOS ALERTAS
+            // Usamos la nueva función para que el objeto sepa que esta ID es legítima
+            idComp.SetNetworkID(data.objectID);
 
             return idComp;
         }
