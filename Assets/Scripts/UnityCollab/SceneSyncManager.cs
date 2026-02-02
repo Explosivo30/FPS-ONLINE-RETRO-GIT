@@ -13,6 +13,8 @@ public class SceneSyncManager : MonoBehaviour
     public bool isApplyingNetworkChange = false;
 
     private List<GameObject> pendingUploads = new List<GameObject>();
+
+    // Memorias para saber qué ha cambiado
     private Dictionary<string, Vector3> lastPositions = new Dictionary<string, Vector3>();
     private Dictionary<string, Quaternion> lastRotations = new Dictionary<string, Quaternion>();
     private Dictionary<string, Vector3> lastScales = new Dictionary<string, Vector3>();
@@ -23,8 +25,8 @@ public class SceneSyncManager : MonoBehaviour
         Instance = this;
 #if UNITY_EDITOR
         EditorApplication.update += MainLoop;
-        // DETECTAR CAMBIOS EN LA JERARQUÍA (DUPLICADOS, BORRADOS, CREACIONES)
-        EditorApplication.hierarchyChanged += OnHierarchyChanged;
+        // CRUCIAL: Detecta cuando seleccionas el nuevo clon tras hacer Ctrl+D
+        Selection.selectionChanged += OnSelectionChanged;
 #endif
     }
 
@@ -32,27 +34,31 @@ public class SceneSyncManager : MonoBehaviour
     {
 #if UNITY_EDITOR
         EditorApplication.update -= MainLoop;
-        EditorApplication.hierarchyChanged -= OnHierarchyChanged;
+        Selection.selectionChanged -= OnSelectionChanged;
 #endif
     }
 
-    // --- NUEVO: CUANDO LA JERARQUÍA CAMBIA (CTRL+D) ---
-    private void OnHierarchyChanged()
+    // --- DETECTOR DE NUEVOS OBJETOS (Al seleccionarlos) ---
+    private void OnSelectionChanged()
     {
         if (isApplyingNetworkChange) return;
-        if (Application.isPlaying) return;
 
-        // Cuando duplicas (Ctrl+D), Unity selecciona el nuevo objeto automáticamente.
-        // Aprovechamos esto para meterlo en la cola de subida INMEDIATAMENTE.
 #if UNITY_EDITOR
         foreach (GameObject go in Selection.gameObjects)
         {
             var idComp = go.GetComponent<SceneObjectIdentifier>();
+
             if (idComp != null)
             {
-                // Forzamos validación por si es un clon recién hecho
+                // Si es un clon, aquí tendrá una ID nueva o invalidada
                 idComp.ValidateID();
-                UploadNewObject(go);
+                string id = idComp.UniqueID;
+
+                // Si no tenemos este objeto en memoria, es NUEVO. ¡Súbelo ya!
+                if (!lastPositions.ContainsKey(id))
+                {
+                    UploadNewObject(go);
+                }
             }
         }
 #endif
@@ -67,7 +73,6 @@ public class SceneSyncManager : MonoBehaviour
 
     public void UploadNewObject(GameObject go)
     {
-        // Evitamos duplicados en la lista para no enviar 2 veces lo mismo
         if (!pendingUploads.Contains(go)) pendingUploads.Add(go);
     }
 
@@ -90,23 +95,27 @@ public class SceneSyncManager : MonoBehaviour
             string id = idComp.UniqueID;
             if (string.IsNullOrEmpty(id)) continue;
 
-            // Debug.Log($"[Collab] Creando/Actualizando objeto: {go.name}");
+            // Debug.Log($"[Collab] Enviando datos de creación para: {go.name}");
 
-            // PACK COMPLETO (Texto plano separado por barras)
+            // === AQUÍ ASEGURAMOS QUE NO SEAN DEFAULTS ===
+            // Leemos directamente del transform del objeto clonado
             string p = V3ToString(go.transform.position);
-            string r = V3ToString(go.transform.eulerAngles);
-            string s = V3ToString(go.transform.localScale);
+            string r = V3ToString(go.transform.eulerAngles); // <--- Rotación real (ej: 0, 45, 0)
+            string s = V3ToString(go.transform.localScale);  // <--- Escala real (ej: 2, 2, 2)
 
+            // Empaquetamos todo separado por barras
             string simplePayload = $"{p}|{r}|{s}";
 
             SendData("create", id, simplePayload, go);
 
+            // Material
             Renderer rend = go.GetComponent<Renderer>();
             if (rend != null && rend.sharedMaterial != null)
             {
                 SendData("material", id, rend.sharedMaterial.name, go);
             }
 
+            // Guardamos el estado para no reenviarlo en el siguiente frame
             lastPositions[id] = go.transform.position;
             lastRotations[id] = go.transform.rotation;
             lastScales[id] = go.transform.localScale;
@@ -127,7 +136,7 @@ public class SceneSyncManager : MonoBehaviour
             string id = idComp.UniqueID;
             bool changed = false;
 
-            // A. POSICIÓN
+            // 1. POSICIÓN
             Vector3 currentPos = go.transform.position;
             if (!lastPositions.ContainsKey(id)) lastPositions[id] = currentPos;
             if (Vector3.Distance(lastPositions[id], currentPos) > 0.01f)
@@ -137,7 +146,7 @@ public class SceneSyncManager : MonoBehaviour
                 changed = true;
             }
 
-            // B. ROTACIÓN
+            // 2. ROTACIÓN
             Quaternion currentRot = go.transform.rotation;
             if (!lastRotations.ContainsKey(id)) lastRotations[id] = currentRot;
             if (Quaternion.Angle(lastRotations[id], currentRot) > 0.5f)
@@ -147,7 +156,7 @@ public class SceneSyncManager : MonoBehaviour
                 changed = true;
             }
 
-            // C. ESCALA
+            // 3. ESCALA
             Vector3 currentScale = go.transform.localScale;
             if (!lastScales.ContainsKey(id)) lastScales[id] = currentScale;
             if (Vector3.Distance(lastScales[id], currentScale) > 0.01f)
@@ -157,7 +166,7 @@ public class SceneSyncManager : MonoBehaviour
                 changed = true;
             }
 
-            // D. MATERIAL
+            // 4. MATERIAL
             Renderer rend = go.GetComponent<Renderer>();
             if (rend != null && rend.sharedMaterial != null)
             {
@@ -218,6 +227,7 @@ public class SceneSyncManager : MonoBehaviour
             MeshFilter mf = go.GetComponent<MeshFilter>();
             if (mf != null && mf.sharedMesh != null) meshName = mf.sharedMesh.name;
 
+            // Simplificación de primitivas para evitar errores de nombres complejos
             if (meshName.Contains("Sphere")) meshName = "Sphere";
             else if (meshName.Contains("Capsule")) meshName = "Capsule";
             else if (meshName.Contains("Cylinder")) meshName = "Cylinder";
@@ -231,12 +241,13 @@ public class SceneSyncManager : MonoBehaviour
         CollabNetworkManager.Instance.BroadcastData(json);
     }
 
+    // APLICA LOS CAMBIOS QUE VIENEN DE LA RED 
     public void ApplyFullState(string id, Vector3? pos, Vector3? rot, Vector3? scl, string mat, string prefabPath)
     {
         SceneObjectIdentifier target = FindObjectById(id);
         if (target != null && target.hasUnsyncedChanges) return;
 
-        // SPAWN CON TRANSFORM INICIAL
+        // Si no existe, lo creamos con los valores iniciales (AQUÍ SE APLICA LA ESCALA/ROTACIÓN INICIAL)
         if (target == null && !string.IsNullOrEmpty(prefabPath))
         {
             SceneChangeData temp = new SceneChangeData();
@@ -245,15 +256,27 @@ public class SceneSyncManager : MonoBehaviour
             target = SpawnObject(temp, pos, rot, scl);
         }
 
+        // Si ya existe (o acaba de nacer), actualizamos por si acaso
         if (target != null)
         {
             isApplyingNetworkChange = true;
             Transform t = target.transform;
 
-            if (pos.HasValue && Vector3.Distance(t.position, pos.Value) > 0.05f) { t.position = pos.Value; lastPositions[id] = t.position; }
-            if (rot.HasValue) { Quaternion q = Quaternion.Euler(rot.Value); if (Quaternion.Angle(t.rotation, q) > 1f) { t.rotation = q; lastRotations[id] = t.rotation; } }
-            if (scl.HasValue && Vector3.Distance(t.localScale, scl.Value) > 0.01f) { t.localScale = scl.Value; lastScales[id] = t.localScale; }
-            if (!string.IsNullOrEmpty(mat)) { ApplyMaterial(target.gameObject, mat); lastMaterials[id] = mat; }
+            if (pos.HasValue && Vector3.Distance(t.position, pos.Value) > 0.05f)
+            { t.position = pos.Value; lastPositions[id] = t.position; }
+
+            if (rot.HasValue)
+            {
+                Quaternion q = Quaternion.Euler(rot.Value);
+                if (Quaternion.Angle(t.rotation, q) > 1f)
+                { t.rotation = q; lastRotations[id] = t.rotation; }
+            }
+
+            if (scl.HasValue && Vector3.Distance(t.localScale, scl.Value) > 0.01f)
+            { t.localScale = scl.Value; lastScales[id] = t.localScale; }
+
+            if (!string.IsNullOrEmpty(mat))
+            { ApplyMaterial(target.gameObject, mat); lastMaterials[id] = mat; }
 
             isApplyingNetworkChange = false;
         }
@@ -285,7 +308,8 @@ public class SceneSyncManager : MonoBehaviour
         {
             newObj.name = "NetObj_" + data.objectID.Substring(0, 4);
 
-            // APLICAR TRANSFORM INMEDIATAMENTE
+            // --- APLICACIÓN INMEDIATA DE TRANSFORM ---
+            // Esto evita que aparezca pequeño y luego crezca. Nace ya con el tamaño correcto.
             if (initialPos.HasValue) newObj.transform.position = initialPos.Value;
             if (initialRot.HasValue) newObj.transform.eulerAngles = initialRot.Value;
             if (initialScl.HasValue) newObj.transform.localScale = initialScl.Value;
