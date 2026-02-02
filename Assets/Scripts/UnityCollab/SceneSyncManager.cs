@@ -14,18 +14,20 @@ public class SceneSyncManager : MonoBehaviour
 
     private List<GameObject> pendingUploads = new List<GameObject>();
 
-    // Memorias para saber qué ha cambiado
+    // Memorias de estado
     private Dictionary<string, Vector3> lastPositions = new Dictionary<string, Vector3>();
     private Dictionary<string, Quaternion> lastRotations = new Dictionary<string, Quaternion>();
     private Dictionary<string, Vector3> lastScales = new Dictionary<string, Vector3>();
     private Dictionary<string, string> lastMaterials = new Dictionary<string, string>();
+
+    // NUEVO: Memoria de "Matrículas" de Unity (InstanceID) para detectar clones ilegales
+    private Dictionary<string, int> knownInstanceIDs = new Dictionary<string, int>();
 
     void OnEnable()
     {
         Instance = this;
 #if UNITY_EDITOR
         EditorApplication.update += MainLoop;
-        // CRUCIAL: Detecta cuando seleccionas el nuevo clon tras hacer Ctrl+D
         Selection.selectionChanged += OnSelectionChanged;
 #endif
     }
@@ -38,7 +40,7 @@ public class SceneSyncManager : MonoBehaviour
 #endif
     }
 
-    // --- DETECTOR DE NUEVOS OBJETOS (Al seleccionarlos) ---
+    // --- EL CEREBRO DE LA OPERACIÓN ---
     private void OnSelectionChanged()
     {
         if (isApplyingNetworkChange) return;
@@ -50,15 +52,32 @@ public class SceneSyncManager : MonoBehaviour
 
             if (idComp != null)
             {
-                // Si es un clon, aquí tendrá una ID nueva o invalidada
-                idComp.ValidateID();
-                string id = idComp.UniqueID;
+                // 1. ¿Tiene ID?
+                if (string.IsNullOrEmpty(idComp.UniqueID)) idComp.GenerateID();
 
-                // Si no tenemos este objeto en memoria, es NUEVO. ¡Súbelo ya!
-                if (!lastPositions.ContainsKey(id))
+                string currentID = idComp.UniqueID;
+                int currentUnityID = go.GetInstanceID();
+
+                // 2. DETECTOR DE CLONES (La clave de tu problema)
+                // Si conozco este ID de red, pero pertenece a OTRO objeto de Unity diferente al que tengo seleccionado...
+                if (knownInstanceIDs.ContainsKey(currentID) && knownInstanceIDs[currentID] != currentUnityID)
+                {
+                    // ¡ES UN CLON! Tiene el mismo DNI que el original.
+                    // Le obligamos a sacarse un DNI nuevo inmediatamente.
+                    idComp.GenerateID();
+                    currentID = idComp.UniqueID; // Actualizamos la variable local
+
+                    // Y forzamos la subida INMEDIATA como objeto nuevo
+                    UploadNewObject(go);
+                }
+                // 3. Si es un objeto totalmente nuevo que nunca he visto
+                else if (!knownInstanceIDs.ContainsKey(currentID))
                 {
                     UploadNewObject(go);
                 }
+
+                // Actualizamos la base de datos de matrículas
+                knownInstanceIDs[currentID] = currentUnityID;
             }
         }
 #endif
@@ -91,19 +110,19 @@ public class SceneSyncManager : MonoBehaviour
             var idComp = go.GetComponent<SceneObjectIdentifier>();
             if (idComp == null) continue;
 
-            idComp.ValidateID();
+            // Aseguramos ID
+            if (string.IsNullOrEmpty(idComp.UniqueID)) idComp.GenerateID();
             string id = idComp.UniqueID;
-            if (string.IsNullOrEmpty(id)) continue;
 
-            // Debug.Log($"[Collab] Enviando datos de creación para: {go.name}");
+            // Registramos la matrícula por si acaso
+            knownInstanceIDs[id] = go.GetInstanceID();
 
-            // === AQUÍ ASEGURAMOS QUE NO SEAN DEFAULTS ===
-            // Leemos directamente del transform del objeto clonado
+            // === AQUÍ ENVIAMOS ROTACIÓN Y ESCALA REALES ===
+            // Como detectamos que es nuevo, enviamos el paquete completo "create"
             string p = V3ToString(go.transform.position);
-            string r = V3ToString(go.transform.eulerAngles); // <--- Rotación real (ej: 0, 45, 0)
-            string s = V3ToString(go.transform.localScale);  // <--- Escala real (ej: 2, 2, 2)
+            string r = V3ToString(go.transform.eulerAngles); // <--- Rotación exacta del clon
+            string s = V3ToString(go.transform.localScale);  // <--- Escala exacta del clon
 
-            // Empaquetamos todo separado por barras
             string simplePayload = $"{p}|{r}|{s}";
 
             SendData("create", id, simplePayload, go);
@@ -115,7 +134,7 @@ public class SceneSyncManager : MonoBehaviour
                 SendData("material", id, rend.sharedMaterial.name, go);
             }
 
-            // Guardamos el estado para no reenviarlo en el siguiente frame
+            // Guardamos el estado actual para que el Monitor no se vuelva loco enviando lo mismo
             lastPositions[id] = go.transform.position;
             lastRotations[id] = go.transform.rotation;
             lastScales[id] = go.transform.localScale;
@@ -135,6 +154,9 @@ public class SceneSyncManager : MonoBehaviour
 
             string id = idComp.UniqueID;
             bool changed = false;
+
+            // Actualizar referencia de instancia por si acaso
+            knownInstanceIDs[id] = go.GetInstanceID();
 
             // 1. POSICIÓN
             Vector3 currentPos = go.transform.position;
@@ -227,7 +249,6 @@ public class SceneSyncManager : MonoBehaviour
             MeshFilter mf = go.GetComponent<MeshFilter>();
             if (mf != null && mf.sharedMesh != null) meshName = mf.sharedMesh.name;
 
-            // Simplificación de primitivas para evitar errores de nombres complejos
             if (meshName.Contains("Sphere")) meshName = "Sphere";
             else if (meshName.Contains("Capsule")) meshName = "Capsule";
             else if (meshName.Contains("Cylinder")) meshName = "Cylinder";
@@ -241,24 +262,27 @@ public class SceneSyncManager : MonoBehaviour
         CollabNetworkManager.Instance.BroadcastData(json);
     }
 
-    // APLICA LOS CAMBIOS QUE VIENEN DE LA RED 
     public void ApplyFullState(string id, Vector3? pos, Vector3? rot, Vector3? scl, string mat, string prefabPath)
     {
         SceneObjectIdentifier target = FindObjectById(id);
         if (target != null && target.hasUnsyncedChanges) return;
 
-        // Si no existe, lo creamos con los valores iniciales (AQUÍ SE APLICA LA ESCALA/ROTACIÓN INICIAL)
+        // Si no existe, lo creamos
         if (target == null && !string.IsNullOrEmpty(prefabPath))
         {
             SceneChangeData temp = new SceneChangeData();
             temp.objectID = id;
             temp.prefabGUID = prefabPath;
+            // IMPORTANTE: Al spawnear pasamos los datos para que nazca con rotacion/escala correcta
             target = SpawnObject(temp, pos, rot, scl);
         }
 
-        // Si ya existe (o acaba de nacer), actualizamos por si acaso
+        // Si ya existe (o acaba de nacer), actualizamos si hace falta
         if (target != null)
         {
+            // Registramos su ID para no confundirlo con clones futuros
+            knownInstanceIDs[id] = target.gameObject.GetInstanceID();
+
             isApplyingNetworkChange = true;
             Transform t = target.transform;
 
@@ -308,8 +332,7 @@ public class SceneSyncManager : MonoBehaviour
         {
             newObj.name = "NetObj_" + data.objectID.Substring(0, 4);
 
-            // --- APLICACIÓN INMEDIATA DE TRANSFORM ---
-            // Esto evita que aparezca pequeño y luego crezca. Nace ya con el tamaño correcto.
+            // APLICAR TRANSFORM INICIAL INMEDIATAMENTE
             if (initialPos.HasValue) newObj.transform.position = initialPos.Value;
             if (initialRot.HasValue) newObj.transform.eulerAngles = initialRot.Value;
             if (initialScl.HasValue) newObj.transform.localScale = initialScl.Value;
