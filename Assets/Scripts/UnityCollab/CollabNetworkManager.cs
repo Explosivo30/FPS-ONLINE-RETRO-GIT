@@ -42,8 +42,21 @@ public class CollabNetworkManager : MonoBehaviour
         IsConnected = true;
         Debug.Log($"<color=cyan>[Firebase] Conectado a {sessionID}.</color>");
 
-        // Forzamos una descarga inmediata al conectar
+        // 1. IMPORTANTE: Subir cambios offline antes de nada (Recuperado)
+        if (SceneSyncManager.Instance != null)
+        {
+            SceneSyncManager.Instance.UploadUnsyncedChanges();
+        }
+
+        // 2. Descargar estado del servidor
         StartCoroutine(DownloadData());
+    }
+
+    // --- ESTA ES LA FUNCIÓN QUE FALTABA ---
+    public void Shutdown()
+    {
+        IsConnected = false;
+        Debug.Log("[Firebase] Desconectado.");
     }
 
     public void BroadcastData(string json)
@@ -88,7 +101,7 @@ public class CollabNetworkManager : MonoBehaviour
 
     IEnumerator DownloadData()
     {
-        // Descargamos todo el historial de la sesión
+        // Descargamos los últimos 20 eventos para mantener sincronía
         string url = $"{databaseURL}/{sessionID}.json?orderBy=\"$key\"&limitToLast=20";
 
         using (UnityWebRequest request = UnityWebRequest.Get(url))
@@ -102,21 +115,17 @@ public class CollabNetworkManager : MonoBehaviour
         }
     }
 
-    // --- AQUÍ ESTÁ EL ARREGLO IMPORTANTE ---
+    // --- PROCESADOR DE DATOS INTELIGENTE ---
     private void ProcessServerData(string json)
     {
         if (string.IsNullOrEmpty(json) || json == "null") return;
         if (SceneSyncManager.Instance == null) return;
 
-        // Firebase devuelve un diccionario de IDs aleatorios {"-Nxyz": {...}, "-Nabc": {...}}
-        // Vamos a recorrer el JSON "a lo bruto" buscando objetos
-
-        // 1. Limpiamos un poco el JSON para iterar mejor
+        // Limpiamos un poco el JSON para iterar mejor
         var entries = json.Split(new string[] { "{\"type\"" }, StringSplitOptions.RemoveEmptyEntries);
 
         foreach (var entry in entries)
         {
-            // Reconstruimos el fragmento de JSON (le quitamos la llave de cierre del objeto padre si hace falta)
             string cleanEntry = "{\"type\"" + entry;
             if (cleanEntry.EndsWith("}")) cleanEntry = cleanEntry.Substring(0, cleanEntry.LastIndexOf("}"));
 
@@ -126,45 +135,41 @@ public class CollabNetworkManager : MonoBehaviour
                 string id = ExtractString(cleanEntry, "\"objectID\":");
                 string type = ExtractString(cleanEntry, "\"type\":");
 
-                // === AQUÍ LA CLAVE: LEER EL PREFAB GUID/MESH ===
+                // Extraemos INFO DE CREACIÓN (Prefab/Mesh)
                 string prefabInfo = ExtractString(cleanEntry, "\"prefabGUID\":");
-                string matInfo = ExtractString(cleanEntry, "\"material\":"); // Por si acaso viaja aquí
+                string matInfo = ExtractString(cleanEntry, "\"material\":");
 
                 if (string.IsNullOrEmpty(id)) continue;
 
                 // Extraemos valores transform
                 Vector3? pos = ExtractVector3(cleanEntry, "\"value\":");
-                // A veces el valor viene directo o dentro de un objeto, intentamos parsear lo que haya
 
                 // Enviamos TODO al SceneSyncManager
-                // Él decidirá: "Si el objeto 'id' no existe, uso 'prefabInfo' para crearlo"
                 SceneSyncManager.Instance.ApplyFullState(
                     id,
                     (type == "transform") ? pos : null,
-                    (type == "rotation") ? pos : null, // Reutilizamos pos porque el json es igual {x,y,z}
+                    (type == "rotation") ? pos : null,
                     (type == "scale") ? pos : null,
                     matInfo,
-                    prefabInfo // <--- ESTE DATO ES VITAL PARA CREAR OBJETOS NUEVOS
+                    prefabInfo // <--- Vital para crear objetos nuevos
                 );
             }
-            catch (Exception e)
+            catch (Exception)
             {
                 // Ignoramos errores de parseo puntuales
             }
         }
     }
 
-    // --- PARSERS MANUALES (Más rápidos y seguros que JsonUtility para fragmentos sucios) ---
+    // --- PARSERS MANUALES ---
 
     private string ExtractString(string json, string key)
     {
-        // Busca: "key":"VALOR"
         int startIdx = json.IndexOf(key);
         if (startIdx == -1) return null;
 
         startIdx += key.Length;
 
-        // Saltamos espacios y comillas
         int valueStart = json.IndexOf("\"", startIdx) + 1;
         int valueEnd = json.IndexOf("\"", valueStart);
 
@@ -175,19 +180,15 @@ public class CollabNetworkManager : MonoBehaviour
 
     private Vector3? ExtractVector3(string json, string key)
     {
-        // Busca el objeto JSON {x:1, y:2, z:3} después de la clave
         int startIdx = json.IndexOf(key);
         if (startIdx == -1) return null;
 
-        // Buscamos el inicio del objeto valor '{'
         int braceStart = json.IndexOf("{", startIdx);
         int braceEnd = json.IndexOf("}", braceStart);
 
         if (braceStart == -1 || braceEnd == -1) return null;
 
         string vectorJson = json.Substring(braceStart, braceEnd - braceStart + 1);
-
-        // Un poco sucio pero efectivo: limpiamos las comillas extra que mete Unity al serializar strings dentro de strings
         vectorJson = vectorJson.Replace("\\", "");
 
         try
@@ -216,7 +217,7 @@ public class CollabNetworkManager : MonoBehaviour
             {
                 while (!op.isDone) await System.Threading.Tasks.Task.Delay(10);
             }
-            else if (routine.Current is WaitForSeconds ws)
+            else if (routine.Current is WaitForSeconds)
             {
                 await System.Threading.Tasks.Task.Delay(500);
             }
