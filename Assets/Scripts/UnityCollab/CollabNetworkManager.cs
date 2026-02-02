@@ -1,9 +1,7 @@
 using System;
 using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Networking;
-using System.Text.RegularExpressions; // <--- IMPORTANTE: Necesario para leer el nuevo JSON
 
 #if UNITY_EDITOR
 using UnityEditor;
@@ -14,12 +12,11 @@ public class CollabNetworkManager : MonoBehaviour
 {
     public static CollabNetworkManager Instance;
 
-    public string databaseURL = "";
+    public string databaseURL = ""; // Tu URL de Firebase
     public string sessionID = "default_session";
     public bool IsConnected { get; private set; } = false;
 
-    private double lastUpdate = 0;
-    private float syncInterval = 0.5f; // Comprobamos cada 0.5s
+    private float syncInterval = 0.5f;
 
     void OnEnable()
     {
@@ -43,175 +40,167 @@ public class CollabNetworkManager : MonoBehaviour
         databaseURL = url;
         sessionID = session;
         IsConnected = true;
-        Debug.Log($"<color=cyan>[Firebase] Conectado.</color>");
+        Debug.Log($"<color=cyan>[Firebase] Conectado a {sessionID}.</color>");
 
-        // 1. Subir cambios offline antes de nada
-        if (SceneSyncManager.Instance != null)
-        {
-            SceneSyncManager.Instance.UploadUnsyncedChanges();
-        }
-
-        // 2. Descargar el estado del mundo
-        DownloadChanges();
+        // Forzamos una descarga inmediata al conectar
+        StartCoroutine(DownloadData());
     }
 
-    public void Shutdown()
-    {
-        IsConnected = false;
-        Debug.Log("[Firebase] Desconectado.");
-    }
-
-    private void NetworkLoop()
-    {
-        if (!IsConnected || string.IsNullOrEmpty(databaseURL)) return;
-
-        double time = EditorApplication.timeSinceStartup;
-        if (time - lastUpdate > syncInterval)
-        {
-            lastUpdate = time;
-            DownloadChanges();
-        }
-    }
-
-    // --- ENVIAR DATOS (Ahora usa sub-carpetas para no borrar datos previos) ---
     public void BroadcastData(string json)
     {
         if (!IsConnected) return;
-
-        SceneChangeData data = JsonUtility.FromJson<SceneChangeData>(json);
-
-        string subPath = "";
-        string bodyToSend = "";
-
-        // Clasificamos para enviar a la carpeta correcta en Firebase
-        if (data.type == "transform")
-        {
-            subPath = "pos";
-            bodyToSend = data.value;
-        }
-        else if (data.type == "rotation")
-        {
-            subPath = "rot";
-            bodyToSend = data.value;
-        }
-        else if (data.type == "scale")
-        {
-            subPath = "scl";
-            bodyToSend = data.value;
-        }
-        else if (data.type == "material")
-        {
-            subPath = "mat";
-            bodyToSend = "\"" + data.value + "\""; // Strings necesitan comillas
-        }
-
-        // El Prefab ID siempre se intenta actualizar por si es nuevo
-        if (!string.IsNullOrEmpty(data.prefabGUID))
-        {
-            string prefabEndpoint = $"{databaseURL}/{sessionID}/objects/{data.objectID}/prefab.json";
-            StartCoroutine(PutRequest(prefabEndpoint, "\"" + data.prefabGUID + "\""));
-        }
-
-        // Enviamos el dato principal
-        if (subPath != "")
-        {
-            string endpoint = $"{databaseURL}/{sessionID}/objects/{data.objectID}/{subPath}.json";
-            StartCoroutine(PutRequest(endpoint, bodyToSend));
-        }
+        StartCoroutine(PostData(json));
     }
 
-    IEnumerator PutRequest(string url, string bodyJson)
+    // --- CORRUTINAS DE RED ---
+
+    IEnumerator PostData(string json)
     {
-        using (UnityWebRequest request = UnityWebRequest.Put(url, bodyJson))
+        // Usamos POST para añadir a la lista de eventos en Firebase
+        string url = $"{databaseURL}/{sessionID}.json";
+        using (UnityWebRequest request = new UnityWebRequest(url, "POST"))
         {
+            byte[] bodyRaw = System.Text.Encoding.UTF8.GetBytes(json);
+            request.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            request.downloadHandler = new DownloadHandlerBuffer();
             request.SetRequestHeader("Content-Type", "application/json");
+
             yield return request.SendWebRequest();
+
+            if (request.result != UnityWebRequest.Result.Success)
+                Debug.LogError($"Error subiendo: {request.error}");
         }
     }
 
-    // --- RECIBIR DATOS ---
-    void DownloadChanges()
+    // --- BUCLE DE DESCARGA (RECEPCIÓN) ---
+
+    private double lastUpdate = 0;
+    private void NetworkLoop()
     {
-        string endpoint = $"{databaseURL}/{sessionID}/objects.json";
-        StartCoroutine(GetRequest(endpoint));
+        if (!IsConnected) return;
+
+        if (EditorApplication.timeSinceStartup - lastUpdate > syncInterval)
+        {
+            lastUpdate = EditorApplication.timeSinceStartup;
+            StartCoroutine(DownloadData());
+        }
     }
 
-    IEnumerator GetRequest(string url)
+    IEnumerator DownloadData()
     {
+        // Descargamos todo el historial de la sesión
+        string url = $"{databaseURL}/{sessionID}.json?orderBy=\"$key\"&limitToLast=20";
+
         using (UnityWebRequest request = UnityWebRequest.Get(url))
         {
             yield return request.SendWebRequest();
 
             if (request.result == UnityWebRequest.Result.Success)
             {
-                string json = request.downloadHandler.text;
-                if (json != "null" && !string.IsNullOrEmpty(json))
-                {
-                    ProcessFullSceneJSON(json);
-                }
+                ProcessServerData(request.downloadHandler.text);
             }
         }
     }
 
-    // --- PARSER INTELIGENTE (Sustituye al ApplyChange antiguo) ---
-    void ProcessFullSceneJSON(string json)
+    // --- AQUÍ ESTÁ EL ARREGLO IMPORTANTE ---
+    private void ProcessServerData(string json)
     {
+        if (string.IsNullOrEmpty(json) || json == "null") return;
         if (SceneSyncManager.Instance == null) return;
-        if (json.Length < 5) return;
 
-        // Usamos Regex para buscar patrones: "ID_OBJETO": { ... DATOS ... }
-        // Esto lee el diccionario de Firebase sin necesitar librerías externas
-        var matches = Regex.Matches(json, "\"([a-zA-Z0-9_-]+)\":\\s*(\\{.*?\\}(?=\\s*,\\s*\"|\\s*\\}$))", RegexOptions.Singleline);
+        // Firebase devuelve un diccionario de IDs aleatorios {"-Nxyz": {...}, "-Nabc": {...}}
+        // Vamos a recorrer el JSON "a lo bruto" buscando objetos
 
-        foreach (Match match in matches)
+        // 1. Limpiamos un poco el JSON para iterar mejor
+        var entries = json.Split(new string[] { "{\"type\"" }, StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (var entry in entries)
         {
-            string objID = match.Groups[1].Value;   // El ID (ej: "Guid-1234")
-            string content = match.Groups[2].Value; // El contenido (ej: {"pos":..., "rot":...})
+            // Reconstruimos el fragmento de JSON (le quitamos la llave de cierre del objeto padre si hace falta)
+            string cleanEntry = "{\"type\"" + entry;
+            if (cleanEntry.EndsWith("}")) cleanEntry = cleanEntry.Substring(0, cleanEntry.LastIndexOf("}"));
 
-            // Extraemos los trocitos de datos de dentro
-            Vector3? pos = ExtractVector3(content, "\"pos\":");
-            Vector3? rot = ExtractVector3(content, "\"rot\":");
-            Vector3? scl = ExtractVector3(content, "\"scl\":");
-            string mat = ExtractString(content, "\"mat\":");
-            string prefab = ExtractString(content, "\"prefab\":");
+            try
+            {
+                // Extraemos datos básicos
+                string id = ExtractString(cleanEntry, "\"objectID\":");
+                string type = ExtractString(cleanEntry, "\"type\":");
 
-            // --- AQUÍ ESTÁ LA MAGIA: Llamamos a la nueva función ---
-            SceneSyncManager.Instance.ApplyFullState(objID, pos, rot, scl, mat, prefab);
+                // === AQUÍ LA CLAVE: LEER EL PREFAB GUID/MESH ===
+                string prefabInfo = ExtractString(cleanEntry, "\"prefabGUID\":");
+                string matInfo = ExtractString(cleanEntry, "\"material\":"); // Por si acaso viaja aquí
+
+                if (string.IsNullOrEmpty(id)) continue;
+
+                // Extraemos valores transform
+                Vector3? pos = ExtractVector3(cleanEntry, "\"value\":");
+                // A veces el valor viene directo o dentro de un objeto, intentamos parsear lo que haya
+
+                // Enviamos TODO al SceneSyncManager
+                // Él decidirá: "Si el objeto 'id' no existe, uso 'prefabInfo' para crearlo"
+                SceneSyncManager.Instance.ApplyFullState(
+                    id,
+                    (type == "transform") ? pos : null,
+                    (type == "rotation") ? pos : null, // Reutilizamos pos porque el json es igual {x,y,z}
+                    (type == "scale") ? pos : null,
+                    matInfo,
+                    prefabInfo // <--- ESTE DATO ES VITAL PARA CREAR OBJETOS NUEVOS
+                );
+            }
+            catch (Exception e)
+            {
+                // Ignoramos errores de parseo puntuales
+            }
         }
     }
 
-    // --- Ayudantes para leer el texto JSON a mano ---
-    Vector3? ExtractVector3(string json, string key)
+    // --- PARSERS MANUALES (Más rápidos y seguros que JsonUtility para fragmentos sucios) ---
+
+    private string ExtractString(string json, string key)
     {
-        int index = json.IndexOf(key);
-        if (index == -1) return null;
+        // Busca: "key":"VALOR"
+        int startIdx = json.IndexOf(key);
+        if (startIdx == -1) return null;
 
-        int start = json.IndexOf('{', index);
-        int end = json.IndexOf('}', start);
-        if (start == -1 || end == -1) return null;
+        startIdx += key.Length;
 
-        string vJson = json.Substring(start, end - start + 1);
+        // Saltamos espacios y comillas
+        int valueStart = json.IndexOf("\"", startIdx) + 1;
+        int valueEnd = json.IndexOf("\"", valueStart);
+
+        if (valueStart == 0 || valueEnd == -1) return null;
+
+        return json.Substring(valueStart, valueEnd - valueStart);
+    }
+
+    private Vector3? ExtractVector3(string json, string key)
+    {
+        // Busca el objeto JSON {x:1, y:2, z:3} después de la clave
+        int startIdx = json.IndexOf(key);
+        if (startIdx == -1) return null;
+
+        // Buscamos el inicio del objeto valor '{'
+        int braceStart = json.IndexOf("{", startIdx);
+        int braceEnd = json.IndexOf("}", braceStart);
+
+        if (braceStart == -1 || braceEnd == -1) return null;
+
+        string vectorJson = json.Substring(braceStart, braceEnd - braceStart + 1);
+
+        // Un poco sucio pero efectivo: limpiamos las comillas extra que mete Unity al serializar strings dentro de strings
+        vectorJson = vectorJson.Replace("\\", "");
+
         try
         {
-            return JsonUtility.FromJson<SerializableVector3>(vJson).ToVector3();
+            return JsonUtility.FromJson<SerializableVector3>(vectorJson).ToVector3();
         }
-        catch { return null; }
+        catch
+        {
+            return null;
+        }
     }
 
-    string ExtractString(string json, string key)
-    {
-        int index = json.IndexOf(key);
-        if (index == -1) return null;
-
-        int startQuote = json.IndexOf('"', index + key.Length);
-        if (startQuote == -1) return null;
-        int endQuote = json.IndexOf('"', startQuote + 1);
-        if (endQuote == -1) return null;
-
-        return json.Substring(startQuote + 1, endQuote - startQuote - 1);
-    }
-
-    // Helper corrutinas editor
+    // Helpers Editor Async
     public new void StartCoroutine(IEnumerator routine)
     {
 #if UNITY_EDITOR
@@ -226,6 +215,10 @@ public class CollabNetworkManager : MonoBehaviour
             if (routine.Current is UnityWebRequestAsyncOperation op)
             {
                 while (!op.isDone) await System.Threading.Tasks.Task.Delay(10);
+            }
+            else if (routine.Current is WaitForSeconds ws)
+            {
+                await System.Threading.Tasks.Task.Delay(500);
             }
             else
             {
