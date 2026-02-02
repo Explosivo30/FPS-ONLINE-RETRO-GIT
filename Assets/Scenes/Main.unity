@@ -2258,13 +2258,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1466158394}
   serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 14.58, y: 1.94, z: 9.85}
-  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_LocalRotation: {x: 0, y: 0.50994956, z: 0, w: 0.8602043}
+  m_LocalPosition: {x: 7.01, y: 1.94, z: 3.55}
+  m_LocalScale: {x: 1.5814081, y: 1.5814081, z: 1.5814081}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 60.931, z: 0}
 --- !u!1 &1474383025 stripped
 GameObject:
   m_CorrespondingSourceObject: {fileID: 3535534951450539151, guid: 0dc42f8fe5206f245aa3dfc75143556b,
@@ -3443,9 +3443,9 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 2003908127}
   serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 8.95, y: 2.3783166, z: 4.79}
-  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_LocalRotation: {x: 0, y: 0.41050464, z: 0, w: -0.9118585}
+  m_LocalPosition: {x: 12.97, y: 2.15, z: 9.35}
+  m_LocalScale: {x: 2.2993, y: 2.2993, z: 2.2993}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
@@ -5607,6 +5607,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 0c37734bceb98a04a80c9524854f64f0, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  databaseURL: https://onlineeditor-c831c-default-rtdb.europe-west1.firebasedatabase.app
+  sessionID: Sesion1
 --- !u!4 &2053519611
 Transform:
   m_ObjectHideFlags: 0

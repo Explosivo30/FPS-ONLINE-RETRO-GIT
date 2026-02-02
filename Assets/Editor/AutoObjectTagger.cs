@@ -13,7 +13,7 @@ public class AutoObjectTagger
 
     private static void OnComponentAdded(Component component)
     {
-        // Detectar si añades malla O físicas
+        // Detectar si añades malla O físicas (Cubos, Cápsulas, Players...)
         if (component is MeshFilter || component is CharacterController || component is Rigidbody)
         {
             EnsureIdentifier(component.gameObject);
@@ -30,29 +30,38 @@ public class AutoObjectTagger
 
     private static void EnsureIdentifier(GameObject go)
     {
+        // 1. Si ya tiene ID, nos vamos (para no repetir envíos)
         if (go.GetComponent<SceneObjectIdentifier>() != null) return;
 
-        go.AddComponent<SceneObjectIdentifier>();
-        var idScript = go.GetComponent<SceneObjectIdentifier>();
+        // 2. Si no tiene, se lo ponemos
+        var idScript = go.AddComponent<SceneObjectIdentifier>();
+        idScript.GenerateID();
 
-        // Generamos ID si no lo tiene
-        if (idScript != null) idScript.GenerateID();
+        Debug.Log($"[AutoTagger] Nuevo objeto etiquetado: {go.name}");
 
-        Debug.Log($"[AutoTagger] Etiquetado: {go.name}");
+        // 3. MAGIA: Si el sistema de red está listo, subimos este objeto AL INSTANTE
+        if (SceneSyncManager.Instance != null &&
+            CollabNetworkManager.Instance != null &&
+            CollabNetworkManager.Instance.IsConnected)
+        {
+            // Esperamos un frame para asegurar que Unity ha terminado de crear el objeto
+            EditorApplication.delayCall += () =>
+            {
+                if (go != null) SceneSyncManager.Instance.UploadNewObject(go);
+            };
+        }
     }
 
-    // --- FILTRO MEJORADO ---
+    // FILTRO
     private static bool ShouldTag(GameObject go)
     {
-        if (go.name.StartsWith("_")) return false;
+        if (go.name.StartsWith("_")) return false; // Ignorar cosas internas
         if (go.GetComponent<Camera>() != null) return false;
         if (go.GetComponent<Light>() != null) return false;
 
-        // 1. AHORA SÍ detecta al Player (Controller o Rigidbody)
+        // Detectar Players, Cubos, Prefabs visuales...
         if (go.GetComponent<CharacterController>() != null) return true;
         if (go.GetComponent<Rigidbody>() != null) return true;
-
-        // 2. También detecta objetos visibles normales
         if (go.GetComponent<MeshRenderer>() != null) return true;
 
         return false;
@@ -61,7 +70,6 @@ public class AutoObjectTagger
     [MenuItem("Collab Tool/Etiquetar Todos los Objetos de la Escena")]
     public static void TagEverything()
     {
-        // Buscamos Mallas Y Físicas
         var meshObjects = GameObject.FindObjectsOfType<MeshRenderer>();
         var physicsObjects = GameObject.FindObjectsOfType<CharacterController>();
         var rigidObjects = GameObject.FindObjectsOfType<Rigidbody>();
@@ -84,7 +92,7 @@ public class AutoObjectTagger
         ProcessList(physicsObjects);
         ProcessList(rigidObjects);
 
-        Debug.Log($"<color=green>¡Hecho! Se han etiquetado {count} objetos (incluyendo Players).</color>");
+        Debug.Log($"<color=green>¡Hecho! Se han etiquetado {count} objetos.</color>");
     }
 }
 #endif

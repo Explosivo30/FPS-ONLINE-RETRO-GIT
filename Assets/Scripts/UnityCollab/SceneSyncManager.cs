@@ -9,12 +9,13 @@ using UnityEditor;
 public class SceneSyncManager : MonoBehaviour
 {
     public static SceneSyncManager Instance;
-    private bool isApplyingNetworkChange = false;
 
-    // Memorias para saber qué ha cambiado
+    // Variable pública para saber si estamos recibiendo datos (y no enviar bucles)
+    public bool isApplyingNetworkChange = false;
+
     private Dictionary<string, Vector3> lastPositions = new Dictionary<string, Vector3>();
     private Dictionary<string, Quaternion> lastRotations = new Dictionary<string, Quaternion>();
-    private Dictionary<string, Vector3> lastScales = new Dictionary<string, Vector3>(); // NUEVO
+    private Dictionary<string, Vector3> lastScales = new Dictionary<string, Vector3>();
     private Dictionary<string, string> lastMaterials = new Dictionary<string, string>();
 
     void OnEnable()
@@ -32,54 +33,81 @@ public class SceneSyncManager : MonoBehaviour
 #endif
     }
 
-    // --- 1. ENVIAR (Vigilante) ---
+    // --- NUEVA FUNCIÓN: SUBIDA INMEDIATA AL CREAR ---
+    public void UploadNewObject(GameObject go)
+    {
+        // Si estamos conectados y NO es un objeto que acabamos de recibir de la red
+        if (CollabNetworkManager.Instance != null && CollabNetworkManager.Instance.IsConnected && !isApplyingNetworkChange)
+        {
+            var idComp = go.GetComponent<SceneObjectIdentifier>();
+            if (idComp == null) return;
+
+            string id = idComp.UniqueID;
+
+            // Enviamos el paquete completo YA
+            SendData("transform", id, JsonUtility.ToJson(new SerializableVector3(go.transform.position)), go);
+            SendData("rotation", id, JsonUtility.ToJson(new SerializableVector3(go.transform.eulerAngles)), go);
+            SendData("scale", id, JsonUtility.ToJson(new SerializableVector3(go.transform.localScale)), go);
+
+            Renderer rend = go.GetComponent<Renderer>();
+            if (rend != null && rend.sharedMaterial != null)
+            {
+                SendData("material", id, rend.sharedMaterial.name, go);
+            }
+
+            // Registramos sus valores para que el Monitor no los reenvíe duplicados
+            lastPositions[id] = go.transform.position;
+            lastRotations[id] = go.transform.rotation;
+            lastScales[id] = go.transform.localScale;
+
+            Debug.Log($"[Collab] Objeto nuevo subido: {go.name}");
+        }
+    }
+
+    // --- 1. MONITOR (Vigilante de cambios) ---
     private void MonitorSelectedObjects()
     {
         if (isApplyingNetworkChange) return;
-        if (CollabNetworkManager.Instance == null || !CollabNetworkManager.Instance.IsConnected) return;
+
+        bool isConnected = (CollabNetworkManager.Instance != null && CollabNetworkManager.Instance.IsConnected);
 
 #if UNITY_EDITOR
         foreach (GameObject go in Selection.gameObjects)
         {
             var idComp = go.GetComponent<SceneObjectIdentifier>();
-            if (idComp == null) continue; // Si no tiene DNI, pasamos
+            if (idComp == null) continue;
 
             string id = idComp.UniqueID;
-
-            // --- NUEVO: ¿Es la primera vez que tocamos este objeto? ---
-            // Si movemos algo, enviamos un "KeepAlive" o "Create" implícito
-            // Para simplificar: Si detectamos cambio, enviamos datos.
-            // Si el otro lado no tiene el objeto, le enviaremos info de CREACIÓN.
+            bool changed = false;
 
             // A. POSICIÓN
             Vector3 currentPos = go.transform.position;
             if (!lastPositions.ContainsKey(id)) lastPositions[id] = currentPos;
-
             if (Vector3.Distance(lastPositions[id], currentPos) > 0.01f)
             {
-                // Al movernos, enviamos también qué tipo de objeto es, por si el otro no lo tiene
-                SendData("transform", id, JsonUtility.ToJson(new SerializableVector3(currentPos)), go);
+                if (isConnected) SendData("transform", id, JsonUtility.ToJson(new SerializableVector3(currentPos)), go);
                 lastPositions[id] = currentPos;
+                changed = true;
             }
 
             // B. ROTACIÓN
             Quaternion currentRot = go.transform.rotation;
             if (!lastRotations.ContainsKey(id)) lastRotations[id] = currentRot;
-
             if (Quaternion.Angle(lastRotations[id], currentRot) > 0.5f)
             {
-                SendData("rotation", id, JsonUtility.ToJson(new SerializableVector3(currentRot.eulerAngles)), go);
+                if (isConnected) SendData("rotation", id, JsonUtility.ToJson(new SerializableVector3(currentRot.eulerAngles)), go);
                 lastRotations[id] = currentRot;
+                changed = true;
             }
 
-            // C. ESCALA (NUEVO)
+            // C. ESCALA
             Vector3 currentScale = go.transform.localScale;
             if (!lastScales.ContainsKey(id)) lastScales[id] = currentScale;
-
             if (Vector3.Distance(lastScales[id], currentScale) > 0.01f)
             {
-                SendData("scale", id, JsonUtility.ToJson(new SerializableVector3(currentScale)), go);
+                if (isConnected) SendData("scale", id, JsonUtility.ToJson(new SerializableVector3(currentScale)), go);
                 lastScales[id] = currentScale;
+                changed = true;
             }
 
             // D. MATERIAL
@@ -90,9 +118,32 @@ public class SceneSyncManager : MonoBehaviour
                 if (!lastMaterials.ContainsKey(id)) lastMaterials[id] = matName;
                 if (lastMaterials[id] != matName)
                 {
-                    SendData("material", id, matName, go);
+                    if (isConnected) SendData("material", id, matName, go);
                     lastMaterials[id] = matName;
+                    changed = true;
                 }
+            }
+
+            // Marcamos cambios offline
+            if (changed && !isConnected)
+            {
+                idComp.hasUnsyncedChanges = true;
+                EditorUtility.SetDirty(idComp);
+            }
+        }
+#endif
+    }
+
+    public void UploadUnsyncedChanges()
+    {
+#if UNITY_EDITOR
+        SceneObjectIdentifier[] allObjects = FindObjectsOfType<SceneObjectIdentifier>();
+        foreach (var obj in allObjects)
+        {
+            if (obj.hasUnsyncedChanges)
+            {
+                UploadNewObject(obj.gameObject); // Reutilizamos la función de subida completa
+                obj.hasUnsyncedChanges = false;
             }
         }
 #endif
@@ -106,107 +157,62 @@ public class SceneSyncManager : MonoBehaviour
         data.value = val;
         data.timestamp = System.DateTime.Now.Ticks;
 
-        // --- INFO DE CREACIÓN (PREFABS) ---
 #if UNITY_EDITOR
-        // Adjuntamos siempre la ruta del prefab o info del objeto
-        // Así si el receptor NO tiene el objeto, sabe cuál crear.
-
         PrefabAssetType prefabType = PrefabUtility.GetPrefabAssetType(go);
         if (prefabType == PrefabAssetType.Regular || prefabType == PrefabAssetType.Variant)
-        {
-            string path = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(go);
-            data.prefabGUID = path; // Enviamos la ruta: "Assets/Enemigos/Robot.prefab"
-        }
+            data.prefabGUID = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(go);
         else
-        {
-            // Si es un cubo primitivo creado en escena
             data.prefabGUID = "PRIMITIVE";
-        }
 #endif
-
         string json = JsonUtility.ToJson(data);
         CollabNetworkManager.Instance.BroadcastData(json);
     }
 
-    // --- 2. RECIBIR (Aplicar cambios) ---
-    public void ApplyChange(SceneChangeData data)
+    public void ApplyFullState(string id, Vector3? pos, Vector3? rot, Vector3? scl, string mat, string prefabPath)
     {
-        if (data == null) return;
+        SceneObjectIdentifier target = FindObjectById(id);
+        if (target != null && target.hasUnsyncedChanges) return;
 
-        SceneObjectIdentifier target = FindObjectById(data.objectID);
-
-        // --- MAGIA: SI NO EXISTE, LO CREAMOS ---
-        if (target == null)
+        if (target == null && !string.IsNullOrEmpty(prefabPath))
         {
-            target = SpawnObject(data);
-            if (target == null) return; // Si falló la creación, abortamos
+            SceneChangeData temp = new SceneChangeData();
+            temp.objectID = id;
+            temp.prefabGUID = prefabPath;
+            target = SpawnObject(temp);
         }
 
-        isApplyingNetworkChange = true;
+        if (target != null)
+        {
+            isApplyingNetworkChange = true;
+            Transform t = target.transform;
 
-        // APLICAR CAMBIOS
-        if (data.type == "transform")
-        {
-            SerializableVector3 v = JsonUtility.FromJson<SerializableVector3>(data.value);
-            target.transform.position = v.ToVector3();
-            lastPositions[data.objectID] = target.transform.position;
-        }
-        else if (data.type == "rotation")
-        {
-            SerializableVector3 v = JsonUtility.FromJson<SerializableVector3>(data.value);
-            target.transform.rotation = Quaternion.Euler(v.ToVector3());
-            lastRotations[data.objectID] = target.transform.rotation;
-        }
-        else if (data.type == "scale") // NUEVO
-        {
-            SerializableVector3 v = JsonUtility.FromJson<SerializableVector3>(data.value);
-            target.transform.localScale = v.ToVector3();
-            lastScales[data.objectID] = target.transform.localScale;
-        }
-        else if (data.type == "material")
-        {
-            ApplyMaterial(target.gameObject, data.value);
-        }
+            if (pos.HasValue && Vector3.Distance(t.position, pos.Value) > 0.05f) { t.position = pos.Value; lastPositions[id] = t.position; }
+            if (rot.HasValue) { Quaternion q = Quaternion.Euler(rot.Value); if (Quaternion.Angle(t.rotation, q) > 1f) { t.rotation = q; lastRotations[id] = t.rotation; } }
+            if (scl.HasValue && Vector3.Distance(t.localScale, scl.Value) > 0.01f) { t.localScale = scl.Value; lastScales[id] = t.localScale; }
+            if (!string.IsNullOrEmpty(mat)) { ApplyMaterial(target.gameObject, mat); lastMaterials[id] = mat; }
 
-        MarkDirty(target);
-        isApplyingNetworkChange = false;
+            MarkDirty(target);
+            isApplyingNetworkChange = false;
+        }
     }
 
-    // --- SISTEMA DE SPAWN (NUEVO) ---
     private SceneObjectIdentifier SpawnObject(SceneChangeData data)
     {
 #if UNITY_EDITOR
         GameObject newObj = null;
-
-        if (data.prefabGUID == "PRIMITIVE")
-        {
-            // Si no sabemos qué es, creamos un Cubo por defecto
-            newObj = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            newObj.name = "Cubo_Red_" + data.objectID.Substring(0, 4);
-        }
+        if (data.prefabGUID == "PRIMITIVE") { newObj = GameObject.CreatePrimitive(PrimitiveType.Cube); newObj.name = "NetObj_" + data.objectID.Substring(0, 4); }
         else if (!string.IsNullOrEmpty(data.prefabGUID))
         {
-            // Intentamos cargar el prefab desde la ruta
             GameObject prefab = AssetDatabase.LoadAssetAtPath<GameObject>(data.prefabGUID);
-            if (prefab != null)
-            {
-                newObj = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
-            }
-            else
-            {
-                Debug.LogWarning($"[Collab] Falta el prefab: {data.prefabGUID}. Creando cubo temporal.");
-                newObj = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                newObj.name = "MISSING_PREFAB";
-            }
+            if (prefab != null) newObj = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
+            else { newObj = GameObject.CreatePrimitive(PrimitiveType.Cube); newObj.name = "MISSING: " + data.prefabGUID; }
         }
 
         if (newObj != null)
         {
-            // IMPORTANTE: Le asignamos el ID que viene de la red
             var idComp = newObj.GetComponent<SceneObjectIdentifier>();
             if (idComp == null) idComp = newObj.AddComponent<SceneObjectIdentifier>();
-
-            idComp.UniqueID = data.objectID; // Forzamos el ID del otro usuario
+            idComp.UniqueID = data.objectID;
             return idComp;
         }
 #endif
@@ -218,7 +224,7 @@ public class SceneSyncManager : MonoBehaviour
 #if UNITY_EDITOR
         Renderer rend = go.GetComponent<Renderer>();
         if (rend == null) return;
-
+        if (rend.sharedMaterial != null && rend.sharedMaterial.name == matName) return;
         string[] guids = AssetDatabase.FindAssets(matName + " t:Material");
         if (guids.Length > 0)
         {
@@ -228,20 +234,11 @@ public class SceneSyncManager : MonoBehaviour
         }
 #endif
     }
-
     private void MarkDirty(Component target)
     {
 #if UNITY_EDITOR
         if (!Application.isPlaying) EditorUtility.SetDirty(target);
 #endif
     }
-
-    private SceneObjectIdentifier FindObjectById(string id)
-    {
-        foreach (var obj in FindObjectsOfType<SceneObjectIdentifier>())
-        {
-            if (obj.UniqueID == id) return obj;
-        }
-        return null;
-    }
+    private SceneObjectIdentifier FindObjectById(string id) { foreach (var obj in FindObjectsOfType<SceneObjectIdentifier>()) if (obj.UniqueID == id) return obj; return null; }
 }
