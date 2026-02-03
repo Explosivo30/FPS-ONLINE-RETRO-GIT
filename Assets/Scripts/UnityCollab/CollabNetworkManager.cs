@@ -12,11 +12,11 @@ public class CollabNetworkManager : MonoBehaviour
 {
     public static CollabNetworkManager Instance;
 
-    public string databaseURL = ""; // Tu URL de Firebase
+    public string databaseURL = "";
     public string sessionID = "default_session";
     public bool IsConnected { get; private set; } = false;
 
-    private float syncInterval = 0.2f;
+    private float syncInterval = 0.5f;
 
     void OnEnable()
     {
@@ -42,17 +42,10 @@ public class CollabNetworkManager : MonoBehaviour
         IsConnected = true;
         Debug.Log($"<color=cyan>[Firebase] Conectado a {sessionID}.</color>");
 
-        // 1. IMPORTANTE: Subir cambios offline antes de nada (Recuperado)
-        if (SceneSyncManager.Instance != null)
-        {
-            SceneSyncManager.Instance.UploadUnsyncedChanges();
-        }
-
-        // 2. Descargar estado del servidor
+        if (SceneSyncManager.Instance != null) SceneSyncManager.Instance.UploadUnsyncedChanges();
         StartCoroutine(DownloadData());
     }
 
-    // --- ESTA ES LA FUNCIÓN QUE FALTABA ---
     public void Shutdown()
     {
         IsConnected = false;
@@ -65,11 +58,8 @@ public class CollabNetworkManager : MonoBehaviour
         StartCoroutine(PostData(json));
     }
 
-    // --- CORRUTINAS DE RED ---
-
     IEnumerator PostData(string json)
     {
-        // Usamos POST para añadir a la lista de eventos en Firebase
         string url = $"{databaseURL}/{sessionID}.json";
         using (UnityWebRequest request = new UnityWebRequest(url, "POST"))
         {
@@ -79,19 +69,14 @@ public class CollabNetworkManager : MonoBehaviour
             request.SetRequestHeader("Content-Type", "application/json");
 
             yield return request.SendWebRequest();
-
-            if (request.result != UnityWebRequest.Result.Success)
-                Debug.LogError($"Error subiendo: {request.error}");
+            if (request.result != UnityWebRequest.Result.Success) Debug.LogError($"Error subiendo: {request.error}");
         }
     }
-
-    // --- BUCLE DE DESCARGA (RECEPCIÓN) ---
 
     private double lastUpdate = 0;
     private void NetworkLoop()
     {
         if (!IsConnected) return;
-
         if (EditorApplication.timeSinceStartup - lastUpdate > syncInterval)
         {
             lastUpdate = EditorApplication.timeSinceStartup;
@@ -101,21 +86,21 @@ public class CollabNetworkManager : MonoBehaviour
 
     IEnumerator DownloadData()
     {
-        // Descargamos los últimos 20 eventos para mantener sincronía
         string url = $"{databaseURL}/{sessionID}.json?orderBy=\"$key\"&limitToLast=20";
-
         using (UnityWebRequest request = UnityWebRequest.Get(url))
         {
             yield return request.SendWebRequest();
-
             if (request.result == UnityWebRequest.Result.Success)
             {
+                // --- DEBUG LOG CRÍTICO ---
+                // Descomenta esto si quieres ver TODO lo que llega de Firebase (puede ser mucho texto)
+                // Debug.Log($"[RAW RECV] {request.downloadHandler.text}");
+                // -------------------------
                 ProcessServerData(request.downloadHandler.text);
             }
         }
     }
 
-    // --- PROCESADOR DE DATOS INTELIGENTE ---
     private void ProcessServerData(string json)
     {
         if (string.IsNullOrEmpty(json) || json == "null") return;
@@ -141,12 +126,13 @@ public class CollabNetworkManager : MonoBehaviour
                 Vector3? rot = null;
                 Vector3? scl = null;
 
-                // === NUEVA LÓGICA DE PARSEO PARA "create" ===
                 if (type == "create")
                 {
-                    // Sacamos el string en formato "1,2,3|0,90,0|1,1,1"
-                    // Al no tener comillas internas, ExtractString funciona perfecto
                     string rawPayload = ExtractString(cleanEntry, "\"value\":");
+
+                    // --- DEBUG LOG CRÍTICO ---
+                    Debug.Log($"<color=orange>[PARSER] Procesando CREATE para ID:{id}. Payload raw: '{rawPayload}'</color>");
+                    // -------------------------
 
                     if (!string.IsNullOrEmpty(rawPayload))
                     {
@@ -156,12 +142,18 @@ public class CollabNetworkManager : MonoBehaviour
                             pos = StringToVector3(parts[0]);
                             rot = StringToVector3(parts[1]);
                             scl = StringToVector3(parts[2]);
+                            // --- DEBUG LOG CRÍTICO ---
+                            Debug.Log($"<color=orange>[PARSER OK] P:{pos} R:{rot} S:{scl}</color>");
+                            // -------------------------
+                        }
+                        else
+                        {
+                            Debug.LogError($"[PARSER ERROR] El payload no tiene 3 partes separadas por '|': {rawPayload}");
                         }
                     }
                 }
                 else
                 {
-                    // Lógica antigua para movimientos sueltos
                     Vector3? val = ExtractVector3(cleanEntry, "\"value\":");
                     if (type == "transform") pos = val;
                     if (type == "rotation") rot = val;
@@ -170,11 +162,37 @@ public class CollabNetworkManager : MonoBehaviour
 
                 SceneSyncManager.Instance.ApplyFullState(id, pos, rot, scl, matInfo, prefabInfo);
             }
-            catch (Exception) { }
+            catch (Exception e)
+            {
+                Debug.LogError($"[PARSER EXCEPTION] Error procesando entrada: {e.Message}");
+            }
         }
     }
 
-    // --- NUEVO HELPER PARA PARSEAR TEXTO PLANO ---
+    private string ExtractString(string json, string key)
+    {
+        int startIdx = json.IndexOf(key);
+        if (startIdx == -1) return null;
+        startIdx += key.Length;
+        int valueStart = json.IndexOf("\"", startIdx) + 1;
+        int valueEnd = json.IndexOf("\"", valueStart);
+        if (valueStart == 0 || valueEnd == -1) return null;
+        return json.Substring(valueStart, valueEnd - valueStart);
+    }
+
+    private Vector3? ExtractVector3(string json, string key)
+    {
+        int startIdx = json.IndexOf(key);
+        if (startIdx == -1) return null;
+        int braceStart = json.IndexOf("{", startIdx);
+        int braceEnd = json.IndexOf("}", braceStart);
+        if (braceStart == -1 || braceEnd == -1) return null;
+        string vectorJson = json.Substring(braceStart, braceEnd - braceStart + 1);
+        vectorJson = vectorJson.Replace("\\", "");
+        try { return JsonUtility.FromJson<SerializableVector3>(vectorJson).ToVector3(); }
+        catch { return null; }
+    }
+
     private Vector3? StringToVector3(string s)
     {
         try
@@ -190,47 +208,6 @@ public class CollabNetworkManager : MonoBehaviour
         catch { return null; }
     }
 
-    // --- PARSERS MANUALES ---
-
-    private string ExtractString(string json, string key)
-    {
-        int startIdx = json.IndexOf(key);
-        if (startIdx == -1) return null;
-
-        startIdx += key.Length;
-
-        int valueStart = json.IndexOf("\"", startIdx) + 1;
-        int valueEnd = json.IndexOf("\"", valueStart);
-
-        if (valueStart == 0 || valueEnd == -1) return null;
-
-        return json.Substring(valueStart, valueEnd - valueStart);
-    }
-
-    private Vector3? ExtractVector3(string json, string key)
-    {
-        int startIdx = json.IndexOf(key);
-        if (startIdx == -1) return null;
-
-        int braceStart = json.IndexOf("{", startIdx);
-        int braceEnd = json.IndexOf("}", braceStart);
-
-        if (braceStart == -1 || braceEnd == -1) return null;
-
-        string vectorJson = json.Substring(braceStart, braceEnd - braceStart + 1);
-        vectorJson = vectorJson.Replace("\\", "");
-
-        try
-        {
-            return JsonUtility.FromJson<SerializableVector3>(vectorJson).ToVector3();
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    // Helpers Editor Async
     public new void StartCoroutine(IEnumerator routine)
     {
 #if UNITY_EDITOR
@@ -242,18 +219,9 @@ public class CollabNetworkManager : MonoBehaviour
     {
         while (routine.MoveNext())
         {
-            if (routine.Current is UnityWebRequestAsyncOperation op)
-            {
-                while (!op.isDone) await System.Threading.Tasks.Task.Delay(10);
-            }
-            else if (routine.Current is WaitForSeconds)
-            {
-                await System.Threading.Tasks.Task.Delay(500);
-            }
-            else
-            {
-                await System.Threading.Tasks.Task.Delay(10);
-            }
+            if (routine.Current is UnityWebRequestAsyncOperation op) { while (!op.isDone) await System.Threading.Tasks.Task.Delay(10); }
+            else if (routine.Current is WaitForSeconds) { await System.Threading.Tasks.Task.Delay(500); }
+            else { await System.Threading.Tasks.Task.Delay(10); }
         }
     }
 }
