@@ -145,7 +145,7 @@ public class CollabNetworkManager : MonoBehaviour
                 if (string.IsNullOrEmpty(data.objectID)) continue;
 
                 // Debug log para ver qué se está parseando:
-                Debug.Log($"<color=orange>[PARSER] Tipo:{data.type} | ID:{data.objectID} | Value:'{data.value}' | Prefab:'{data.prefabGUID}'</color>");
+                //Debug.Log($"<color=orange>[PARSER] Tipo:{data.type} | ID:{data.objectID} | Value:'{data.value}' | Prefab:'{data.prefabGUID}'</color>");
 
                 Vector3? pos = null;
                 Vector3? rot = null;
@@ -163,11 +163,11 @@ public class CollabNetworkManager : MonoBehaviour
                             pos = StringToVector3(parts[0]);
                             rot = StringToVector3(parts[1]);
                             scl = StringToVector3(parts[2]);
-                            Debug.Log($"<color=green>[PARSER OK] P:{pos} R:{rot} S:{scl}</color>");
+                            //Debug.Log($"<color=green>[PARSER OK] P:{pos} R:{rot} S:{scl}</color>");
                         }
                         else
                         {
-                            Debug.LogError($"[PARSER ERROR] El payload no tiene 3 partes separadas por '|': '{data.value}'");
+                            //Debug.LogError($"[PARSER ERROR] El payload no tiene 3 partes separadas por '|': '{data.value}'");
                         }
                     }
                 }

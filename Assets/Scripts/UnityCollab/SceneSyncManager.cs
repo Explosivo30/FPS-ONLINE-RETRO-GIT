@@ -108,9 +108,9 @@ public class SceneSyncManager : MonoBehaviour
             string s = V3ToString(go.transform.localScale);
             string simplePayload = $"{p}|{r}|{s}";
 
-            // --- DEBUG LOG CRÍTICO ---
-            Debug.Log($"<color=yellow>[SEND] Enviando CREATE para {go.name} (ID:{id}). Payload: {simplePayload}</color>");
-            // -------------------------
+            
+            //Debug.Log($"<color=yellow>[SEND] Enviando CREATE para {go.name} (ID:{id}). Payload: {simplePayload}</color>");
+            
 
             SendData("create", id, simplePayload, go);
 
