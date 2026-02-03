@@ -2,10 +2,23 @@ using System;
 using System.Collections;
 using UnityEngine;
 using UnityEngine.Networking;
+using System.Collections.Generic;
+
 
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
+
+// Clase auxiliar para deserializar el diccionario que retorna Firebase con POST
+// Firebase retorna: { "-LxAbCdEfG": { ...dato... }, "-LxAbCdEfH": { ...dato... } }
+// Este wrapper permite parsear eso como un Dictionary<string, SceneChangeData>
+[Serializable]
+public class FirebaseEntryWrapper
+{
+    // Mapa de key autogenerada de Firebase -> dato
+    // No podemos usar Dictionary directamente con JsonUtility, así que parseamos manualmente
+    // pero de forma robusta usando JsonUtility para cada entry individual
+}
 
 [ExecuteAlways]
 public class CollabNetworkManager : MonoBehaviour
@@ -92,105 +105,153 @@ public class CollabNetworkManager : MonoBehaviour
             yield return request.SendWebRequest();
             if (request.result == UnityWebRequest.Result.Success)
             {
-                // --- DEBUG LOG CRÍTICO ---
-                // Descomenta esto si quieres ver TODO lo que llega de Firebase (puede ser mucho texto)
+                // Descomenta para ver el JSON crudo de Firebase:
                 // Debug.Log($"[RAW RECV] {request.downloadHandler.text}");
-                // -------------------------
                 ProcessServerData(request.downloadHandler.text);
             }
         }
     }
 
+    /// <summary>
+    /// Firebase con POST retorna un objeto así:
+    /// {
+    ///   "-LxKey1": { "type":"create", "objectID":"abc", "value":"1,2,3|0,0,0|1,1,1", "prefabGUID":"PRIMITIVE:Cube", "timestamp":123 },
+    ///   "-LxKey2": { "type":"transform", "objectID":"abc", "value":"{\"x\":5,\"y\":2,\"z\":3}", ... }
+    /// }
+    /// 
+    /// El problema anterior: se hacía split por '{"type"' lo cual rompía el JSON
+    /// y luego se recortaba el último '}' — resultando en campos perdidos.
+    /// 
+    /// Este nuevo método extrae cada entry individual robustamente usando
+    /// indexOf para encontrar los braces balanceados, y luego usa JsonUtility
+    /// para parsear cada SceneChangeData individual.
+    /// </summary>
     private void ProcessServerData(string json)
     {
         if (string.IsNullOrEmpty(json) || json == "null") return;
         if (SceneSyncManager.Instance == null) return;
 
-        var entries = json.Split(new string[] { "{\"type\"" }, StringSplitOptions.RemoveEmptyEntries);
+        // El JSON exterior es { "key1": {...}, "key2": {...} }
+        // Necesitamos extraer cada valor {...} individualmente
+        var entries = ExtractFirebaseEntries(json);
 
-        foreach (var entry in entries)
+        foreach (var entryJson in entries)
         {
-            string cleanEntry = "{\"type\"" + entry;
-            if (cleanEntry.EndsWith("}")) cleanEntry = cleanEntry.Substring(0, cleanEntry.LastIndexOf("}"));
-
             try
             {
-                string id = ExtractString(cleanEntry, "\"objectID\":");
-                string type = ExtractString(cleanEntry, "\"type\":");
-                string prefabInfo = ExtractString(cleanEntry, "\"prefabGUID\":");
-                string matInfo = ExtractString(cleanEntry, "\"material\":");
+                // Parsear con JsonUtility — esto resuelve el problema de root
+                SceneChangeData data = JsonUtility.FromJson<SceneChangeData>(entryJson);
 
-                if (string.IsNullOrEmpty(id)) continue;
+                if (string.IsNullOrEmpty(data.objectID)) continue;
+
+                // Debug log para ver qué se está parseando:
+                Debug.Log($"<color=orange>[PARSER] Tipo:{data.type} | ID:{data.objectID} | Value:'{data.value}' | Prefab:'{data.prefabGUID}'</color>");
 
                 Vector3? pos = null;
                 Vector3? rot = null;
                 Vector3? scl = null;
+                string mat = null;
 
-                if (type == "create")
+                if (data.type == "create")
                 {
-                    string rawPayload = ExtractString(cleanEntry, "\"value\":");
-
-                    // --- DEBUG LOG CRÍTICO ---
-                    Debug.Log($"<color=orange>[PARSER] Procesando CREATE para ID:{id}. Payload raw: '{rawPayload}'</color>");
-                    // -------------------------
-
-                    if (!string.IsNullOrEmpty(rawPayload))
+                    // El value tiene formato "x,y,z|rx,ry,rz|sx,sy,sz"
+                    if (!string.IsNullOrEmpty(data.value))
                     {
-                        string[] parts = rawPayload.Split('|');
+                        string[] parts = data.value.Split('|');
                         if (parts.Length >= 3)
                         {
                             pos = StringToVector3(parts[0]);
                             rot = StringToVector3(parts[1]);
                             scl = StringToVector3(parts[2]);
-                            // --- DEBUG LOG CRÍTICO ---
-                            Debug.Log($"<color=orange>[PARSER OK] P:{pos} R:{rot} S:{scl}</color>");
-                            // -------------------------
+                            Debug.Log($"<color=green>[PARSER OK] P:{pos} R:{rot} S:{scl}</color>");
                         }
                         else
                         {
-                            Debug.LogError($"[PARSER ERROR] El payload no tiene 3 partes separadas por '|': {rawPayload}");
+                            Debug.LogError($"[PARSER ERROR] El payload no tiene 3 partes separadas por '|': '{data.value}'");
                         }
                     }
                 }
-                else
+                else if (data.type == "transform" || data.type == "rotation" || data.type == "scale")
                 {
-                    Vector3? val = ExtractVector3(cleanEntry, "\"value\":");
-                    if (type == "transform") pos = val;
-                    if (type == "rotation") rot = val;
-                    if (type == "scale") scl = val;
+                    // El value aquí es un JSON serializado de SerializableVector3: {"x":1,"y":2,"z":3}
+                    Vector3? val = null;
+                    if (!string.IsNullOrEmpty(data.value))
+                    {
+                        try
+                        {
+                            SerializableVector3 sv = JsonUtility.FromJson<SerializableVector3>(data.value);
+                            val = sv.ToVector3();
+                        }
+                        catch { /* val stays null */ }
+                    }
+
+                    if (data.type == "transform") pos = val;
+                    else if (data.type == "rotation") rot = val;
+                    else if (data.type == "scale") scl = val;
+                }
+                else if (data.type == "material")
+                {
+                    mat = data.value;
                 }
 
-                SceneSyncManager.Instance.ApplyFullState(id, pos, rot, scl, matInfo, prefabInfo);
+                SceneSyncManager.Instance.ApplyFullState(data.objectID, pos, rot, scl, mat, data.prefabGUID);
             }
             catch (Exception e)
             {
-                Debug.LogError($"[PARSER EXCEPTION] Error procesando entrada: {e.Message}");
+                Debug.LogError($"[PARSER EXCEPTION] Error procesando entrada: {e.Message}\nJSON: {entryJson}");
             }
         }
     }
 
-    private string ExtractString(string json, string key)
+    /// <summary>
+    /// Extrae cada valor JSON individual del objeto raíz de Firebase.
+    /// Maneja los braces balanceados correctamente para no cortar datos.
+    /// </summary>
+    private List<string> ExtractFirebaseEntries(string json)
     {
-        int startIdx = json.IndexOf(key);
-        if (startIdx == -1) return null;
-        startIdx += key.Length;
-        int valueStart = json.IndexOf("\"", startIdx) + 1;
-        int valueEnd = json.IndexOf("\"", valueStart);
-        if (valueStart == 0 || valueEnd == -1) return null;
-        return json.Substring(valueStart, valueEnd - valueStart);
-    }
+        var results = new List<string>();
+        // Buscar cada '{' que corresponde a un valor dentro del objeto raíz
+        // El raíz es { "key": { ... }, "key": { ... } }
+        // Así que buscamos el primer '{' (el raíz), y luego los '{' internos
 
-    private Vector3? ExtractVector3(string json, string key)
-    {
-        int startIdx = json.IndexOf(key);
-        if (startIdx == -1) return null;
-        int braceStart = json.IndexOf("{", startIdx);
-        int braceEnd = json.IndexOf("}", braceStart);
-        if (braceStart == -1 || braceEnd == -1) return null;
-        string vectorJson = json.Substring(braceStart, braceEnd - braceStart + 1);
-        vectorJson = vectorJson.Replace("\\", "");
-        try { return JsonUtility.FromJson<SerializableVector3>(vectorJson).ToVector3(); }
-        catch { return null; }
+        int depth = 0;
+        int entryStart = -1;
+
+        for (int i = 0; i < json.Length; i++)
+        {
+            char c = json[i];
+
+            // Saltar strings para no contar braces dentro de valores string
+            if (c == '"')
+            {
+                i++; // saltar la comilla de apertura
+                while (i < json.Length && json[i] != '"')
+                {
+                    if (json[i] == '\\') i++; // saltar escape
+                    i++;
+                }
+                continue;
+            }
+
+            if (c == '{')
+            {
+                depth++;
+                if (depth == 2) entryStart = i; // depth 1 = raíz, depth 2 = cada entry
+            }
+            else if (c == '}')
+            {
+                if (depth == 2 && entryStart != -1)
+                {
+                    // Extraer el substring completo de este entry
+                    string entry = json.Substring(entryStart, i - entryStart + 1);
+                    results.Add(entry);
+                    entryStart = -1;
+                }
+                depth--;
+            }
+        }
+
+        return results;
     }
 
     private Vector3? StringToVector3(string s)
