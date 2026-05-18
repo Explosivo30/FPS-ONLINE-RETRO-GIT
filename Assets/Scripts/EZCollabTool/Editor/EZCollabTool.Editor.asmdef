@@ -1,0 +1,15 @@
+{
+  "name": "EZCollabTool.Editor",
+  "rootNamespace": "EZCollabTool",
+  "references": [
+    "EZCollabTool.Runtime",
+    "Newtonsoft.Json"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "autoReferenced": false
+}

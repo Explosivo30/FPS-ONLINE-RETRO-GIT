@@ -1,0 +1,10 @@
+{
+  "name": "com.ezcollabtool",
+  "version": "0.1.0",
+  "displayName": "EZCollabTool",
+  "description": "Colaboración en tiempo real para Unity Editor. Host-client via WebSocket directo, sin servicios externos.",
+  "unity": "6000.0",
+  "dependencies": {
+    "com.unity.nuget.newtonsoft-json": "3.2.1"
+  }
+}
