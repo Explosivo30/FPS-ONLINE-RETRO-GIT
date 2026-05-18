@@ -34,7 +34,7 @@ namespace EZCollabTool
         {
             cts = new CancellationTokenSource();
             httpListener = new HttpListener();
-            httpListener.Prefixes.Add($"http://*:{port}/");
+            httpListener.Prefixes.Add($"http://+:{port}/");
             httpListener.Start();
 
             Task.Run(() => AcceptLoop(cts.Token));
