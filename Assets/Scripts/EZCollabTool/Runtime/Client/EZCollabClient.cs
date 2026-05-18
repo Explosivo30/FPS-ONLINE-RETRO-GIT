@@ -1,5 +1,5 @@
 using System;
-using System.Net.WebSockets;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -8,22 +8,25 @@ namespace EZCollabTool
 {
     public class EZCollabClient
     {
-        ClientWebSocket socket;
+        TcpClient client;
+        NetworkStream stream;
         CancellationTokenSource cts;
 
         public readonly System.Collections.Concurrent.ConcurrentQueue<EZMessage> incomingMessages
             = new System.Collections.Concurrent.ConcurrentQueue<EZMessage>();
 
-        public bool isConnected => socket?.State == WebSocketState.Open;
+        public bool isConnected => client != null && client.Connected;
 
         public async Task<bool> Connect(string host, int port)
         {
             cts = new CancellationTokenSource();
-            socket = new ClientWebSocket();
+            client = new TcpClient();
+            client.NoDelay = true; // Desactiva el algoritmo de Nagle para tener baja latencia
 
             try
             {
-                await socket.ConnectAsync(new Uri($"ws://{host}:{port}/"), cts.Token);
+                await client.ConnectAsync(host, port);
+                stream = client.GetStream();
 
                 // Primer mensaje: presentarse al servidor
                 var joinMsg = EZMessage.Create(MessageType.PeerJoined, EZCollabState.localPeerId,
@@ -45,8 +48,7 @@ namespace EZCollabTool
         public void Disconnect()
         {
             cts?.Cancel();
-            try { socket?.CloseAsync(WebSocketCloseStatus.NormalClosure, "client leaving", CancellationToken.None).Wait(); }
-            catch { }
+            try { client?.Close(); } catch { }
         }
 
         public async Task Send(EZMessage msg)
@@ -55,7 +57,9 @@ namespace EZCollabTool
             try
             {
                 var bytes = msg.ToBytes();
-                await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, cts.Token);
+                var lengthBytes = BitConverter.GetBytes(bytes.Length);
+                await stream.WriteAsync(lengthBytes, 0, 4, cts.Token);
+                await stream.WriteAsync(bytes, 0, bytes.Length, cts.Token);
             }
             catch (Exception e)
             {
@@ -63,25 +67,46 @@ namespace EZCollabTool
             }
         }
 
+        async Task<int> ReadExact(NetworkStream s, byte[] buffer, int count, CancellationToken token)
+        {
+            int totalRead = 0;
+            while (totalRead < count)
+            {
+                int read = await s.ReadAsync(buffer, totalRead, count - totalRead, token);
+                if (read == 0) return 0;
+                totalRead += read;
+            }
+            return totalRead;
+        }
+
         async Task ReceiveLoop()
         {
-            var buffer = new byte[65536];
+            var lengthBuffer = new byte[4];
+            byte[] payloadBuffer = new byte[32768];
 
             while (!cts.Token.IsCancellationRequested && isConnected)
             {
                 try
                 {
-                    var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
+                    int read = await ReadExact(stream, lengthBuffer, 4, cts.Token);
+                    if (read == 0) break; // Desconectado
 
-                    if (result.MessageType == WebSocketMessageType.Close)
-                        break;
+                    int length = BitConverter.ToInt32(lengthBuffer, 0);
+                    if (length > 10 * 1024 * 1024) throw new Exception("Payload too large"); // Sanity check
+                    
+                    if (payloadBuffer.Length < length)
+                        payloadBuffer = new byte[length];
 
-                    var msg = EZMessage.FromBytes(buffer[..result.Count]);
+                    read = await ReadExact(stream, payloadBuffer, length, cts.Token);
+                    if (read == 0) break;
+
+                    var msg = EZMessage.FromBytes(payloadBuffer[..length]);
                     incomingMessages.Enqueue(msg);
                 }
                 catch (Exception e) when (!cts.Token.IsCancellationRequested)
                 {
-                    Debug.LogWarning($"[EZCollab] Receive error: {e.Message}");
+                    if (!(e is System.IO.IOException))
+                        Debug.LogWarning($"[EZCollab] Receive error: {e.Message}");
                     break;
                 }
             }

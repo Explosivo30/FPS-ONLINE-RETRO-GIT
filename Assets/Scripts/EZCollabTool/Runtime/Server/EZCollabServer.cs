@@ -2,17 +2,16 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Net;
-using System.Net.WebSockets;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
-using Newtonsoft.Json;
 
 namespace EZCollabTool
 {
     public class EZCollabServer
     {
-        HttpListener httpListener;
+        TcpListener tcpListener;
         CancellationTokenSource cts;
 
         readonly ConcurrentDictionary<string, ConnectedClient> clients = new ConcurrentDictionary<string, ConnectedClient>();
@@ -27,15 +26,15 @@ namespace EZCollabTool
         {
             public string peerId;
             public string peerName;
-            public WebSocket socket;
+            public TcpClient client;
+            public NetworkStream stream;
         }
 
         public void Start(int port)
         {
             cts = new CancellationTokenSource();
-            httpListener = new HttpListener();
-            httpListener.Prefixes.Add($"http://+:{port}/");
-            httpListener.Start();
+            tcpListener = new TcpListener(IPAddress.Any, port);
+            tcpListener.Start();
 
             Task.Run(() => AcceptLoop(cts.Token));
         }
@@ -43,12 +42,11 @@ namespace EZCollabTool
         public void Stop()
         {
             cts?.Cancel();
-            httpListener?.Stop();
+            tcpListener?.Stop();
 
             foreach (var client in clients.Values)
             {
-                try { client.socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "server stopping", CancellationToken.None).Wait(); }
-                catch { }
+                try { client.client.Close(); } catch { }
             }
 
             clients.Clear();
@@ -60,18 +58,11 @@ namespace EZCollabTool
             {
                 try
                 {
-                    var ctx = await httpListener.GetContextAsync();
-
-                    if (!ctx.Request.IsWebSocketRequest)
-                    {
-                        ctx.Response.StatusCode = 400;
-                        ctx.Response.Close();
-                        continue;
-                    }
-
-                    var wsCtx = await ctx.AcceptWebSocketAsync(null);
-                    _ = Task.Run(() => HandleClient(wsCtx.WebSocket, token));
+                    var client = await tcpListener.AcceptTcpClientAsync();
+                    client.NoDelay = true; // Para baja latencia
+                    _ = Task.Run(() => HandleClient(client, token));
                 }
+                catch (ObjectDisposedException) { break; } // El listener se cerró
                 catch (Exception e) when (!token.IsCancellationRequested)
                 {
                     Debug.LogError($"[EZCollab] Accept error: {e.Message}");
@@ -79,21 +70,44 @@ namespace EZCollabTool
             }
         }
 
-        async Task HandleClient(WebSocket socket, CancellationToken token)
+        async Task<int> ReadExact(NetworkStream stream, byte[] buffer, int count, CancellationToken token)
+        {
+            int totalRead = 0;
+            while (totalRead < count)
+            {
+                int read = await stream.ReadAsync(buffer, totalRead, count - totalRead, token);
+                if (read == 0) return 0;
+                totalRead += read;
+            }
+            return totalRead;
+        }
+
+        async Task HandleClient(TcpClient tcpClient, CancellationToken token)
         {
             string peerId = null;
             string peerName = null;
+            var stream = tcpClient.GetStream();
+            var lengthBuffer = new byte[4];
             var buffer = new byte[32768];
 
             try
             {
                 // El primer mensaje que manda el cliente es PeerJoined con su info
-                var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
-                var joinMsg = EZMessage.FromBytes(buffer[..result.Count]);
+                int read = await ReadExact(stream, lengthBuffer, 4, token);
+                if (read == 0) return;
+                
+                int length = BitConverter.ToInt32(lengthBuffer, 0);
+                if (length > 10 * 1024 * 1024) throw new Exception("Payload too large");
+                if (buffer.Length < length) buffer = new byte[length];
+
+                read = await ReadExact(stream, buffer, length, token);
+                if (read == 0) return;
+
+                var joinMsg = EZMessage.FromBytes(buffer[..length]);
 
                 if (joinMsg.type != MessageType.PeerJoined)
                 {
-                    await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "expected PeerJoined", token);
+                    tcpClient.Close();
                     return;
                 }
 
@@ -101,11 +115,11 @@ namespace EZCollabTool
                 peerId = peerInfo.peerId;
                 peerName = peerInfo.peerName;
 
-                var client = new ConnectedClient { peerId = peerId, peerName = peerName, socket = socket };
+                var client = new ConnectedClient { peerId = peerId, peerName = peerName, client = tcpClient, stream = stream };
                 clients[peerId] = client;
 
                 // Mandar snapshot de escena al nuevo cliente
-                await SendSnapshot(socket, token);
+                await SendSnapshot(client, token);
 
                 // Notificar a todos que entró alguien
                 var joinedMsg = EZMessage.Create(MessageType.PeerJoined, EZCollabState.localPeerId, peerInfo);
@@ -114,23 +128,30 @@ namespace EZCollabTool
                 incomingMessages.Enqueue(joinMsg);
 
                 // Bucle de recepción
-                while (socket.State == WebSocketState.Open && !token.IsCancellationRequested)
+                while (tcpClient.Connected && !token.IsCancellationRequested)
                 {
-                    result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
+                    read = await ReadExact(stream, lengthBuffer, 4, token);
+                    if (read == 0) break; // Desconectado
 
-                    if (result.MessageType == WebSocketMessageType.Close)
-                        break;
+                    length = BitConverter.ToInt32(lengthBuffer, 0);
+                    if (length > 10 * 1024 * 1024) throw new Exception("Payload too large");
+                    if (buffer.Length < length) buffer = new byte[length];
 
-                    var msg = EZMessage.FromBytes(buffer[..result.Count]);
+                    read = await ReadExact(stream, buffer, length, token);
+                    if (read == 0) break;
+
+                    var msg = EZMessage.FromBytes(buffer[..length]);
                     await ProcessMessage(msg, peerId, token);
                 }
             }
             catch (Exception e) when (!token.IsCancellationRequested)
             {
-                Debug.LogWarning($"[EZCollab] Client error ({peerId}): {e.Message}");
+                if (!(e is System.IO.IOException))
+                    Debug.LogWarning($"[EZCollab] Client error ({peerId}): {e.Message}");
             }
             finally
             {
+                try { tcpClient.Close(); } catch { }
                 if (peerId != null)
                     await HandleDisconnect(peerId, peerName, token);
             }
@@ -210,34 +231,42 @@ namespace EZCollabTool
             incomingMessages.Enqueue(leftMsg);
         }
 
-        async Task SendSnapshot(WebSocket socket, CancellationToken token)
+        async Task SendSnapshot(ConnectedClient client, CancellationToken token)
         {
             var snapshot = EZSceneSerializer.CaptureScene();
             var msg = EZMessage.Create(MessageType.SceneSnapshot, EZCollabState.localPeerId, snapshot);
-            var bytes = msg.ToBytes();
-            await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
+            await SendInternal(client, msg, token);
+        }
+
+        async Task SendInternal(ConnectedClient client, EZMessage msg, CancellationToken token)
+        {
+            try
+            {
+                var bytes = msg.ToBytes();
+                var lengthBytes = BitConverter.GetBytes(bytes.Length);
+                await client.stream.WriteAsync(lengthBytes, 0, 4, token);
+                await client.stream.WriteAsync(bytes, 0, bytes.Length, token);
+            }
+            catch { }
         }
 
         async Task SendTo(string peerId, EZMessage msg, CancellationToken token)
         {
             if (!clients.TryGetValue(peerId, out var client)) return;
-            try
-            {
-                var bytes = msg.ToBytes();
-                await client.socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
-            }
-            catch { }
+            await SendInternal(client, msg, token);
         }
 
         async Task BroadcastExcept(EZMessage msg, string excludePeerId, CancellationToken token)
         {
             var bytes = msg.ToBytes();
+            var lengthBytes = BitConverter.GetBytes(bytes.Length);
             foreach (var kv in clients)
             {
                 if (kv.Key == excludePeerId) continue;
                 try
                 {
-                    await kv.Value.socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
+                    await kv.Value.stream.WriteAsync(lengthBytes, 0, 4, token);
+                    await kv.Value.stream.WriteAsync(bytes, 0, bytes.Length, token);
                 }
                 catch { }
             }
@@ -246,11 +275,13 @@ namespace EZCollabTool
         async Task BroadcastAll(EZMessage msg, CancellationToken token)
         {
             var bytes = msg.ToBytes();
+            var lengthBytes = BitConverter.GetBytes(bytes.Length);
             foreach (var kv in clients)
             {
                 try
                 {
-                    await kv.Value.socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
+                    await kv.Value.stream.WriteAsync(lengthBytes, 0, 4, token);
+                    await kv.Value.stream.WriteAsync(bytes, 0, bytes.Length, token);
                 }
                 catch { }
             }
