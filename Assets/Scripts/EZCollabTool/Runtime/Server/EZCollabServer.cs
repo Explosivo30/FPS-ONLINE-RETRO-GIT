@@ -233,7 +233,22 @@ namespace EZCollabTool
 
         async Task SendSnapshot(ConnectedClient client, CancellationToken token)
         {
-            var snapshot = EZSceneSerializer.CaptureScene();
+            var tcs = new TaskCompletionSource<SceneSnapshot>();
+
+            UnityEditor.EditorApplication.delayCall += () =>
+            {
+                try
+                {
+                    var snap = EZSceneSerializer.CaptureScene();
+                    tcs.TrySetResult(snap);
+                }
+                catch (Exception e)
+                {
+                    tcs.TrySetException(e);
+                }
+            };
+
+            var snapshot = await tcs.Task;
             var msg = EZMessage.Create(MessageType.SceneSnapshot, EZCollabState.localPeerId, snapshot);
             await SendInternal(client, msg, token);
         }
